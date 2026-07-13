@@ -44,8 +44,18 @@ def mock_server_startup(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         calls["webbrowser_open"] = url
         return True
 
-    def fake_create_app(adapter: Any, *, write: bool, on_startup: Any = None) -> Any:
-        app = real_create_app(adapter, write=write, on_startup=on_startup)
+    def fake_create_app(
+        adapter: Any,
+        *,
+        write: bool,
+        token: Any = None,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        on_startup: Any = None,
+    ) -> Any:
+        app = real_create_app(
+            adapter, write=write, token=token, host=host, port=port, on_startup=on_startup
+        )
         if on_startup is not None:
             on_startup()
         return app
@@ -321,3 +331,26 @@ def test_resolve_port_auto_assigns_distinct_ports_when_called_twice() -> None:
     port_b = cli_module._resolve_port("127.0.0.1", 0)
     assert isinstance(port_a, int)
     assert isinstance(port_b, int)
+
+
+def test_resolve_port_auto_assigns_free_port_for_ipv6_host() -> None:
+    # Regression: AF_INET-only binding raised socket.gaierror for IPv6-only
+    # hosts like "::1". getaddrinfo-based resolution must succeed here.
+    port = cli_module._resolve_port("::1", 0)
+    assert isinstance(port, int)
+    assert port != 0
+    assert 1 <= port <= 65535
+
+
+def test_startup_url_brackets_ipv6_host(mock_server_startup: dict) -> None:
+    result = runner.invoke(app, ["--host", "::1", "--port", "8123"])
+    assert result.exit_code == 0
+    assert "http://[::1]:8123" in result.stdout
+    assert mock_server_startup["uvicorn_run"] == {"host": "::1", "port": 8123}
+
+
+def test_ipv6_host_does_not_warn(mock_server_startup: dict) -> None:
+    result = runner.invoke(app, ["--host", "::1"])
+    assert result.exit_code == 0
+    stderr = result.stderr if result.stderr is not None else ""
+    assert "warning" not in stderr.lower()

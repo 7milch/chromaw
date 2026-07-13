@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { apiFetch } from "./api";
 
 interface HealthResponse {
   ok: boolean;
@@ -12,7 +13,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/health")
+    apiFetch("/api/health")
       .then((res) => {
         if (!res.ok) {
           throw new Error(`request failed: ${res.status}`);

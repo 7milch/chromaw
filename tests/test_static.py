@@ -10,10 +10,20 @@ from chromaw import server as server_module
 from chromaw.chroma_adapter import ChromaAdapter
 from chromaw.server import create_app
 
+_TOKEN = "test-token"
+_HOST = "127.0.0.1"
+_PORT = 8000
+
 
 def _make_adapter(tmp_path: Path) -> ChromaAdapter:
     chromadb.PersistentClient(path=str(tmp_path))
     return ChromaAdapter.open(tmp_path)
+
+
+def _client(app) -> TestClient:
+    client = TestClient(app, base_url=f"http://{_HOST}:{_PORT}")
+    client.headers["Authorization"] = f"Bearer {_TOKEN}"
+    return client
 
 
 class _FakePackage:
@@ -35,8 +45,8 @@ def test_no_static_dir_root_404_but_api_ok(
         server_module, "files", lambda _pkg: _FakePackage(missing_static_dir)
     )
 
-    app = create_app(adapter, write=False)
-    client = TestClient(app)
+    app = create_app(adapter, write=False, token=_TOKEN, host=_HOST, port=_PORT)
+    client = _client(app)
 
     root_response = client.get("/")
     health_response = client.get("/api/health")
@@ -52,12 +62,12 @@ def test_static_dir_present_serves_index_and_api(
 
     static_dir = tmp_path / "static"
     static_dir.mkdir()
-    (static_dir / "index.html").write_text("<html><body>chromaw</body></html>")
+    (static_dir / "index.html").write_text("<html><head></head><body>chromaw</body></html>")
 
     monkeypatch.setattr(server_module, "files", lambda _pkg: _FakePackage(static_dir))
 
-    app = create_app(adapter, write=False)
-    client = TestClient(app)
+    app = create_app(adapter, write=False, token=_TOKEN, host=_HOST, port=_PORT)
+    client = _client(app)
 
     root_response = client.get("/")
     health_response = client.get("/api/health")
@@ -65,6 +75,26 @@ def test_static_dir_present_serves_index_and_api(
     assert root_response.status_code == 200
     assert "chromaw" in root_response.text
     assert health_response.status_code == 200
+
+
+def test_index_html_contains_token_meta_tag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _make_adapter(tmp_path / "chroma")
+
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<html><head></head><body>chromaw</body></html>")
+
+    monkeypatch.setattr(server_module, "files", lambda _pkg: _FakePackage(static_dir))
+
+    app = create_app(adapter, write=False, token=_TOKEN, host=_HOST, port=_PORT)
+    client = _client(app)
+
+    root_response = client.get("/")
+
+    assert root_response.status_code == 200
+    assert f'<meta name="chromaw-token" content="{_TOKEN}">' in root_response.text
 
 
 def test_static_dir_present_without_index_html_root_404_but_api_ok(
@@ -84,8 +114,8 @@ def test_static_dir_present_without_index_html_root_404_but_api_ok(
 
     monkeypatch.setattr(server_module, "files", lambda _pkg: _FakePackage(static_dir))
 
-    app = create_app(adapter, write=False)
-    client = TestClient(app)
+    app = create_app(adapter, write=False, token=_TOKEN, host=_HOST, port=_PORT)
+    client = _client(app)
 
     root_response = client.get("/")
     health_response = client.get("/api/health")
@@ -107,12 +137,12 @@ def test_spa_deep_path_currently_404s_not_shadowed_as_html(
 
     static_dir = tmp_path / "static"
     static_dir.mkdir()
-    (static_dir / "index.html").write_text("<html><body>chromaw-spa</body></html>")
+    (static_dir / "index.html").write_text("<html><head></head><body>chromaw-spa</body></html>")
 
     monkeypatch.setattr(server_module, "files", lambda _pkg: _FakePackage(static_dir))
 
-    app = create_app(adapter, write=False)
-    client = TestClient(app)
+    app = create_app(adapter, write=False, token=_TOKEN, host=_HOST, port=_PORT)
+    client = _client(app)
 
     deep_response = client.get("/collections/some-collection/records/123")
     root_response = client.get("/")
@@ -132,12 +162,12 @@ def test_api_route_not_shadowed_by_static_mount(
 
     static_dir = tmp_path / "static"
     static_dir.mkdir()
-    (static_dir / "index.html").write_text("<html><body>chromaw-spa</body></html>")
+    (static_dir / "index.html").write_text("<html><head></head><body>chromaw-spa</body></html>")
 
     monkeypatch.setattr(server_module, "files", lambda _pkg: _FakePackage(static_dir))
 
-    app = create_app(adapter, write=False)
-    client = TestClient(app)
+    app = create_app(adapter, write=False, token=_TOKEN, host=_HOST, port=_PORT)
+    client = _client(app)
 
     response = client.get("/api/does-not-exist")
 

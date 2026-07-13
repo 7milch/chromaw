@@ -59,6 +59,9 @@ def test_real_server_starts_and_responds_over_http(tmp_path: Path) -> None:
                 break
             except urllib.error.HTTPError as exc:
                 # Server responded (even with an error status) -> it's up.
+                # Unauthenticated /api requests are rejected with 401 by the
+                # security middleware (technical-spec §10.2) before routing
+                # even gets a chance to 404.
                 response = exc
                 break
             except (urllib.error.URLError, ConnectionError) as exc:
@@ -66,7 +69,7 @@ def test_real_server_starts_and_responds_over_http(tmp_path: Path) -> None:
                 time.sleep(0.2)
 
         assert response is not None, f"server never accepted connections: {last_exc}"
-        assert response.code == 404
+        assert response.code == 401
     finally:
         proc.terminate()
         try:

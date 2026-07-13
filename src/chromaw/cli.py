@@ -11,6 +11,7 @@ import uvicorn
 from chromaw import __version__
 from chromaw.chroma_adapter import ChromaAdapter
 from chromaw.errors import ChromawError
+from chromaw.security import generate_token
 from chromaw.server import create_app
 
 app = typer.Typer(
@@ -19,7 +20,7 @@ app = typer.Typer(
     add_completion=False,
 )
 
-_LOCAL_HOSTS = {"127.0.0.1", "localhost"}
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 def _version_callback(value: bool) -> None:
@@ -34,13 +35,32 @@ def _resolve_port(host: str, port: int) -> int:
     Binds a socket to determine a free port and immediately releases it. This
     cannot fully eliminate the race against another process grabbing the same
     port before uvicorn binds it, but it minimizes the window.
+
+    ``host`` may resolve to an IPv4 or IPv6 address (e.g. ``::1``); the
+    address family is resolved via ``socket.getaddrinfo`` so binding does not
+    assume AF_INET, which would raise ``socket.gaierror`` for IPv6-only
+    hosts such as ``::1``.
     """
     if port != 0:
         return port
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind((host, 0))
+    family, socktype, proto, _, sockaddr = socket.getaddrinfo(
+        host, 0, type=socket.SOCK_STREAM
+    )[0]
+    with socket.socket(family, socktype, proto) as sock:
+        sock.bind(sockaddr)
         return sock.getsockname()[1]
+
+
+def _format_host_for_url(host: str) -> str:
+    """Return ``host`` formatted for embedding in a URL.
+
+    IPv6 addresses must be bracketed (e.g. ``[::1]``) to disambiguate the
+    address's colons from the URL's own ``:port`` separator.
+    """
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
 
 
 @app.command()
@@ -89,7 +109,11 @@ def main(
     if host not in _LOCAL_HOSTS:
         typer.echo(
             f"warning: binding to '{host}' exposes chromaw beyond localhost. "
-            "Only do this on a trusted network.",
+            "Only do this on a trusted network. Note: the SecurityMiddleware "
+            "Host allow-list still only accepts localhost-style Host headers, "
+            "so requests carrying any other Host header (e.g. a LAN IP or "
+            "hostname) will receive 403 even though the socket itself is "
+            "reachable from the network.",
             err=True,
         )
 
@@ -103,12 +127,21 @@ def main(
     typer.echo(f"connected: path={adapter.path} collections={len(collections)}")
 
     resolved_port = _resolve_port(host, port)
-    url = f"http://{host}:{resolved_port}"
+    display_host = "127.0.0.1" if host == "0.0.0.0" else host
+    url = f"http://{_format_host_for_url(display_host)}:{resolved_port}"
     typer.echo(f"chromaw is running at {url}")
 
     def open_browser() -> None:
         if not no_open:
             webbrowser.open(url)
 
-    fastapi_app = create_app(adapter, write=write, on_startup=open_browser)
+    token = generate_token()
+    fastapi_app = create_app(
+        adapter,
+        write=write,
+        token=token,
+        host=host,
+        port=resolved_port,
+        on_startup=open_browser,
+    )
     uvicorn.run(fastapi_app, host=host, port=resolved_port)

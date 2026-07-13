@@ -13,7 +13,7 @@
 ## Milestone 0: Skeleton
 
 - [x] M0-1: `pyproject.toml` と `src/chromaw/` パッケージ構成、Typer CLI (`chromaw ./path`) の初期化 (Issue #1)
-- [ ] M0-2: `chromadb.PersistentClient(path=...)` 接続と起動時エラーハンドリング（§11.1）
+- [x] M0-2: `chromadb.PersistentClient(path=...)` 接続と起動時エラーハンドリング（§11.1） (Issue #2)
 - [ ] M0-3: FastAPI サーバー起動（port 自動割当、`--host` / `--port` / `--no-open` オプション）
 - [ ] M0-4: `GET /api/health` エンドポイント
 - [ ] M0-5: `web/` の Vite + React + TypeScript + Tailwind 初期化、build 成果物を `src/chromaw/static/` へ配信

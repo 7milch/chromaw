@@ -1,9 +1,25 @@
+from pathlib import Path
+
+import chromadb
+import pytest
 from typer.testing import CliRunner
 
 from chromaw import __version__
 from chromaw.cli import app
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def chroma_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Make the current working directory a valid (empty) ChromaDB directory.
+
+    Several tests below invoke the CLI with the default path (".") and expect
+    a successful connection, so cwd needs to be a real ChromaDB directory.
+    """
+    chromadb.PersistentClient(path=str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
 
 
 def test_help() -> None:
@@ -32,11 +48,12 @@ def test_default_values() -> None:
     assert "port=0" in result.stdout
     assert "mode=read-only" in result.stdout
     assert "open_browser=True" in result.stdout
+    assert "collections=0" in result.stdout
 
 
 def test_path_argument_accepted() -> None:
     result = runner.invoke(app, ["/tmp/some-chroma-dir"])
-    assert result.exit_code == 0
+    assert result.exit_code != 0
     assert "path=/tmp/some-chroma-dir" in result.stdout
 
 
@@ -71,13 +88,16 @@ def test_path_before_options() -> None:
     assert "port=8123" in result.stdout
 
 
-def test_path_and_multiple_options_combined() -> None:
+def test_path_and_multiple_options_combined(tmp_path: Path) -> None:
+    chroma_dir = tmp_path / "data-chroma"
+    chromadb.PersistentClient(path=str(chroma_dir))
+
     result = runner.invoke(
         app,
-        ["/data/chroma", "--host", "0.0.0.0", "--port", "9000", "--no-open", "--write"],
+        [str(chroma_dir), "--host", "0.0.0.0", "--port", "9000", "--no-open", "--write"],
     )
     assert result.exit_code == 0
-    assert "path=/data/chroma" in result.stdout
+    assert f"path={chroma_dir}" in result.stdout
     assert "host=0.0.0.0" in result.stdout
     assert "port=9000" in result.stdout
     assert "mode=write" in result.stdout
@@ -100,3 +120,91 @@ def test_version_takes_precedence_and_exits_eagerly() -> None:
     result = runner.invoke(app, ["--version", "--port", "not-a-number"])
     assert result.exit_code == 0
     assert __version__ in result.stdout
+
+
+def test_nonexistent_path_without_create_fails(tmp_path: Path) -> None:
+    missing = tmp_path / "does-not-exist"
+
+    result = runner.invoke(app, [str(missing)])
+
+    assert result.exit_code != 0
+    assert "error" in result.stdout.lower() or "error" in (result.stderr or "").lower()
+
+
+def test_nonexistent_path_with_create_succeeds(tmp_path: Path) -> None:
+    missing = tmp_path / "new-chroma-dir"
+
+    result = runner.invoke(app, [str(missing), "--create"])
+
+    assert result.exit_code == 0
+    assert missing.exists()
+    assert "collections=0" in result.stdout
+
+
+def test_empty_dir_without_create_fails(tmp_path: Path) -> None:
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+
+    result = runner.invoke(app, [str(empty_dir)])
+
+    assert result.exit_code != 0
+
+
+def test_empty_dir_with_create_succeeds(tmp_path: Path) -> None:
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+
+    result = runner.invoke(app, [str(empty_dir), "--create"])
+
+    assert result.exit_code == 0
+    assert (empty_dir / "chroma.sqlite3").exists()
+
+
+def test_non_chroma_directory_fails(tmp_path: Path) -> None:
+    non_chroma_dir = tmp_path / "non-chroma"
+    non_chroma_dir.mkdir()
+    (non_chroma_dir / "readme.txt").write_text("not chroma")
+
+    result = runner.invoke(app, [str(non_chroma_dir)])
+
+    assert result.exit_code != 0
+
+
+def test_valid_chroma_dir_reports_collection_count(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    client.create_collection("foo")
+    client.create_collection("bar")
+
+    result = runner.invoke(app, [str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "collections=2" in result.stdout
+
+
+def test_path_is_a_file_fails(tmp_path: Path) -> None:
+    file_path = tmp_path / "im-a-file"
+    file_path.write_text("not a directory")
+
+    result = runner.invoke(app, [str(file_path)])
+
+    assert result.exit_code != 0
+
+
+def test_existing_valid_chroma_dir_with_create_flag_succeeds(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    client.create_collection("foo")
+
+    result = runner.invoke(app, [str(tmp_path), "--create"])
+
+    assert result.exit_code == 0
+    assert "collections=1" in result.stdout
+
+
+def test_nested_nonexistent_path_with_create_creates_parents(tmp_path: Path) -> None:
+    nested = tmp_path / "a" / "b" / "c"
+
+    result = runner.invoke(app, [str(nested), "--create"])
+
+    assert result.exit_code == 0
+    assert nested.exists()
+    assert "collections=0" in result.stdout

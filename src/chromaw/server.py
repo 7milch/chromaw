@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from importlib.resources import files
 from typing import AsyncIterator, Callable, Optional
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from chromaw.api import router as api_router
 from chromaw.chroma_adapter import ChromaAdapter
@@ -40,5 +42,9 @@ def create_app(
     app.state.path = adapter.path
 
     app.include_router(api_router)
+
+    static_dir = files("chromaw").joinpath("static")
+    if static_dir.joinpath("index.html").is_file():
+        app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
 
     return app

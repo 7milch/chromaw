@@ -18,7 +18,7 @@
 - [x] M0-4: `GET /api/health` エンドポイント (Issue #4)
 - [x] M0-5: `web/` の Vite + React + TypeScript + Tailwind 初期化、build 成果物を `src/chromaw/static/` へ配信 (Issue #5)
 - [x] M0-6: セキュリティ基盤（127.0.0.1 bind、ランダム token による Bearer 認証、Origin/Host 検証）（§10） (Issue #6)
-- [ ] M0-7: pytest と一時ディレクトリ ChromaDB fixture によるテスト基盤
+- [x] M0-7: pytest と一時ディレクトリ ChromaDB fixture によるテスト基盤 (Issue #7)
 
 ## Milestone 1: Read-only viewer
 

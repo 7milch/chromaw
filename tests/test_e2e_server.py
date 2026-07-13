@@ -12,6 +12,9 @@ import urllib.request
 from pathlib import Path
 
 import chromadb
+import pytest
+
+pytestmark = pytest.mark.e2e
 
 
 def _wait_for_port_line(proc: subprocess.Popen, timeout: float = 15.0) -> int:

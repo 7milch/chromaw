@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "./api";
+import { exportCollectionRecords, type ExportFilters } from "./export";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import ShortcutsHelpModal from "./ShortcutsHelpModal";
 import type {
@@ -112,6 +113,12 @@ function App() {
   const [detailMissing, setDetailMissing] = useState(false);
 
   const [helpOpen, setHelpOpen] = useState(false);
+
+  const [exportRunning, setExportRunning] = useState(false);
+  const [exportCount, setExportCount] = useState(0);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportTruncated, setExportTruncated] = useState(false);
+  const exportAbortRef = useRef<AbortController | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -312,6 +319,69 @@ function App() {
     setOffset(0);
   }
 
+  async function startExport() {
+    if (!selectedName) return;
+
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
+    setExportRunning(true);
+    setExportCount(0);
+    setExportError(null);
+    setExportTruncated(false);
+
+    const filters: ExportFilters | null = activeSearch
+      ? {
+          ...(activeSearch.ids !== undefined ? { ids: activeSearch.ids } : {}),
+          ...(activeSearch.where !== undefined ? { where: activeSearch.where } : {}),
+          ...(activeSearch.where_document !== undefined
+            ? { where_document: activeSearch.where_document }
+            : {}),
+        }
+      : null;
+
+    try {
+      const result = await exportCollectionRecords(selectedName, filters, {
+        signal: controller.signal,
+        onProgress: setExportCount,
+      });
+
+      const payload = {
+        collection: result.collection,
+        exported_at: result.exported_at,
+        filters: result.filters,
+        records: result.records,
+        ...(result.truncated ? { truncated: true } : {}),
+      };
+
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${result.collection}-records-${result.exported_at}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      setExportTruncated(result.truncated);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        // Cancelled by the user; nothing to report.
+      } else {
+        setExportError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      exportAbortRef.current = null;
+      setExportRunning(false);
+    }
+  }
+
+  function cancelExport() {
+    exportAbortRef.current?.abort();
+  }
+
   // ids-based search returns every match in one page (chromaw ignores
   // limit/offset for it server-side), so paging controls are meaningless
   // and disabled in that mode.
@@ -384,16 +454,52 @@ function App() {
           {selected && (
             <>
               <div className="rounded border border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => setDetailOpen((v) => !v)}
-                  className="flex w-full items-center justify-between px-3 py-2 text-left text-sm"
-                >
-                  <span className="font-semibold">{selected.name}</span>
-                  <span className="text-xs text-slate-500">
-                    {detailOpen ? "hide details ▲" : "show details ▼"}
-                  </span>
-                </button>
+                <div className="flex w-full items-center justify-between px-3 py-2 text-sm">
+                  <button
+                    type="button"
+                    onClick={() => setDetailOpen((v) => !v)}
+                    className="flex flex-1 items-center justify-between text-left"
+                  >
+                    <span className="font-semibold">{selected.name}</span>
+                    <span className="text-xs text-slate-500">
+                      {detailOpen ? "hide details ▲" : "show details ▼"}
+                    </span>
+                  </button>
+                  <div className="ml-3 flex shrink-0 items-center gap-2">
+                    {exportRunning ? (
+                      <>
+                        <span className="text-xs text-slate-400">
+                          {exportCount} records...
+                        </span>
+                        <button
+                          type="button"
+                          onClick={cancelExport}
+                          className="rounded border border-slate-700 px-2 py-1 text-xs hover:bg-slate-800"
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={startExport}
+                        className="rounded border border-slate-700 px-2 py-1 text-xs hover:bg-slate-800"
+                      >
+                        Export JSON
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {exportError && (
+                  <p className="border-t border-slate-800 px-3 py-1 text-xs text-red-400">
+                    Export failed: {exportError}
+                  </p>
+                )}
+                {!exportRunning && exportTruncated && (
+                  <p className="border-t border-slate-800 px-3 py-1 text-xs text-amber-400">
+                    Export truncated at 100,000 records.
+                  </p>
+                )}
                 {detailOpen && (
                   <div className="space-y-3 border-t border-slate-800 px-3 py-3">
                     <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">

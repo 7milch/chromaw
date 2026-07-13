@@ -27,7 +27,7 @@
 - [x] M1-3: 3ペイン詳細 UI（collection / record list / detail） (Issue #10)
 - [x] M1-4: 検索（by ID, where, where_document） (Issue #11)
 - [x] M1-5: 読み取り系キーボードショートカット (Issue #12)
-- [ ] M1-6: JSON export
+- [x] M1-6: JSON export (Issue #13)
 
 ## Milestone 2: Safe editor
 

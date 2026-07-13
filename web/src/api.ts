@@ -15,5 +15,8 @@ export function apiFetch(input: string, init: RequestInit = {}): Promise<Respons
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
+  // `init.signal` (e.g. from an AbortController) is part of RequestInit and
+  // passes straight through to fetch, so callers can already cancel
+  // in-flight requests by supplying one.
   return fetch(input, { ...init, headers });
 }

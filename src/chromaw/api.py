@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from chromaw import __version__
-from chromaw.models import HealthResponse
+from chromaw.models import CollectionsResponse, HealthResponse
 
 router = APIRouter(prefix="/api")
 
@@ -18,3 +18,11 @@ def get_health(request: Request) -> HealthResponse:
         mode=request.app.state.mode,
         path=str(request.app.state.path),
     )
+
+
+@router.get("/collections", response_model=CollectionsResponse)
+def get_collections(request: Request) -> CollectionsResponse:
+    """List all collections in the connected ChromaDB directory."""
+
+    adapter = request.app.state.adapter
+    return CollectionsResponse(collections=adapter.list_collections())

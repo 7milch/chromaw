@@ -22,7 +22,7 @@
 
 ## Milestone 1: Read-only viewer
 
-- [ ] M1-1: collections API と一覧 UI
+- [x] M1-1: collections API と一覧 UI (Issue #8)
 - [ ] M1-2: records API（paging）と一覧 UI
 - [ ] M1-3: 3ペイン詳細 UI（collection / record list / detail）
 - [ ] M1-4: 検索（by ID, where, where_document）

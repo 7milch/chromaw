@@ -10,3 +10,19 @@ class HealthResponse(BaseModel):
     version: str
     mode: str
     path: str
+
+
+class CollectionInfo(BaseModel):
+    """Summary information for a single ChromaDB collection."""
+
+    id: str
+    name: str
+    count: int
+    metadata: dict | None
+    dimension: int | None
+
+
+class CollectionsResponse(BaseModel):
+    """Response body for ``GET /api/collections``."""
+
+    collections: list[CollectionInfo]

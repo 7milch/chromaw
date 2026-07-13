@@ -11,6 +11,7 @@ from chromaw.errors import (
     ChromaInvalidDirectoryError,
     ChromaPathNotFoundError,
 )
+from chromaw.models import CollectionInfo
 
 _SQLITE_FILENAME = "chroma.sqlite3"
 
@@ -81,7 +82,30 @@ class ChromaAdapter:
 
         return cls(path=path, _client=client)
 
-    def list_collections(self) -> list[str]:
-        """Return the names of all collections in this ChromaDB directory."""
+    def list_collections(self) -> list[CollectionInfo]:
+        """Return summary info for all collections in this ChromaDB directory.
+
+        ``dimension`` is estimated by fetching a single record's embedding
+        from the collection (``get(limit=1, include=["embeddings"])``) and
+        reading its length; collections with zero records yield ``None``.
+        """
         collections = self._client.list_collections()
-        return [c.name if hasattr(c, "name") else str(c) for c in collections]
+        result: list[CollectionInfo] = []
+        for collection in collections:
+            count = collection.count()
+            dimension: int | None = None
+            if count > 0:
+                sample = collection.get(limit=1, include=["embeddings"])
+                embeddings = sample.get("embeddings")
+                if embeddings is not None and len(embeddings) > 0:
+                    dimension = len(embeddings[0])
+            result.append(
+                CollectionInfo(
+                    id=str(collection.id),
+                    name=collection.name,
+                    count=count,
+                    metadata=collection.metadata,
+                    dimension=dimension,
+                )
+            )
+        return result

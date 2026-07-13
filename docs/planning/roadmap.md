@@ -24,7 +24,7 @@
 
 - [x] M1-1: collections API と一覧 UI (Issue #8)
 - [x] M1-2: records API（paging）と一覧 UI (Issue #9)
-- [ ] M1-3: 3ペイン詳細 UI（collection / record list / detail）
+- [x] M1-3: 3ペイン詳細 UI（collection / record list / detail） (Issue #10)
 - [ ] M1-4: 検索（by ID, where, where_document）
 - [ ] M1-5: 読み取り系キーボードショートカット
 - [ ] M1-6: JSON export

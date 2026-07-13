@@ -8,6 +8,10 @@ import type {
   RecordsResponse,
 } from "./types";
 
+function formatMetadataJson(metadata: Record<string, unknown> | null): string {
+  return metadata ? JSON.stringify(metadata, null, 2) : "null";
+}
+
 const PAGE_LIMIT = 50;
 
 function summarizeMetadata(metadata: Record<string, unknown> | null): string {
@@ -29,6 +33,11 @@ function App() {
   const [offset, setOffset] = useState(0);
   const [recordsError, setRecordsError] = useState<string | null>(null);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
+
+  const [detailRecord, setDetailRecord] = useState<RecordInfo | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailMissing, setDetailMissing] = useState(false);
 
   useEffect(() => {
     apiFetch("/api/health")
@@ -100,6 +109,52 @@ function App() {
       ignore = true;
     };
   }, [selectedName, offset]);
+
+  // Fetch full detail (including embeddings) for the selected record.
+  // Same out-of-order-response guard as the records list fetch above.
+  useEffect(() => {
+    setDetailRecord(null);
+    setDetailError(null);
+    setDetailMissing(false);
+
+    if (!selectedName || !selectedRecordId) return;
+
+    let ignore = false;
+    setDetailLoading(true);
+
+    apiFetch(`/api/collections/${encodeURIComponent(selectedName)}/records/get`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ids: [selectedRecordId],
+        include: ["documents", "metadatas", "uris", "embeddings"],
+      }),
+    })
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`request failed: ${res.status}`);
+        }
+        return res.json() as Promise<RecordsResponse>;
+      })
+      .then((data) => {
+        if (ignore) return;
+        const record = data.records[0] ?? null;
+        setDetailRecord(record);
+        setDetailMissing(record === null);
+      })
+      .catch((err: unknown) => {
+        if (ignore) return;
+        setDetailError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (ignore) return;
+        setDetailLoading(false);
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, [selectedName, selectedRecordId]);
 
   const selected = collections?.find((c) => c.name === selectedName) ?? null;
 
@@ -279,15 +334,95 @@ function App() {
           )}
         </main>
 
-        <aside className="w-72 shrink-0 border-l border-slate-800 overflow-y-auto p-3">
+        <aside className="w-96 shrink-0 border-l border-slate-800 overflow-y-auto p-3">
           <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
             Detail
           </h2>
-          <p className="mt-2 text-sm text-slate-400">
-            {selectedRecordId
-              ? `Selected record: ${selectedRecordId}`
-              : "Record detail view coming soon."}
-          </p>
+
+          {!selectedRecordId && (
+            <p className="mt-2 text-sm text-slate-400">
+              Select a record from the table to see its details.
+            </p>
+          )}
+
+          {selectedRecordId && detailLoading && (
+            <p className="mt-2 text-sm text-slate-400">Loading record...</p>
+          )}
+
+          {selectedRecordId && !detailLoading && detailError && (
+            <p className="mt-2 text-sm text-red-400">
+              Failed to load record: {detailError}
+            </p>
+          )}
+
+          {selectedRecordId && !detailLoading && !detailError && detailMissing && (
+            <p className="mt-2 text-sm text-slate-400">
+              This record is no longer present in the collection.
+            </p>
+          )}
+
+          {selectedRecordId && !detailLoading && !detailError && detailRecord && (
+            <div className="mt-2 space-y-4 text-sm">
+              <div>
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  id
+                </h3>
+                <code className="block select-all break-all rounded bg-slate-900 px-2 py-1 text-xs text-slate-300">
+                  {detailRecord.id}
+                </code>
+              </div>
+
+              <div>
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  document
+                </h3>
+                <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-900 p-2 font-mono text-xs text-slate-300">
+                  {detailRecord.document ?? "-"}
+                </pre>
+              </div>
+
+              <div>
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  metadata
+                </h3>
+                <pre className="max-h-64 overflow-auto rounded bg-slate-900 p-2 font-mono text-xs text-slate-300">
+                  {formatMetadataJson(detailRecord.metadata)}
+                </pre>
+              </div>
+
+              <div>
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  uri
+                </h3>
+                <p className="break-all text-xs text-slate-300">
+                  {detailRecord.uri ?? "-"}
+                </p>
+              </div>
+
+              <div>
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  embedding
+                </h3>
+                {detailRecord.embedding_dimension === null ? (
+                  <p className="text-xs text-slate-400">No embedding available.</p>
+                ) : (
+                  <div className="space-y-1">
+                    <p className="text-xs text-slate-400">
+                      dimension: {detailRecord.embedding_dimension}
+                    </p>
+                    <pre className="overflow-x-auto rounded bg-slate-900 p-2 font-mono text-xs text-slate-300">
+                      [{(detailRecord.embedding_preview ?? []).join(", ")}
+                      {(detailRecord.embedding_preview?.length ?? 0) <
+                      detailRecord.embedding_dimension
+                        ? ", ..."
+                        : ""}
+                      ]
+                    </pre>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </aside>
       </div>
     </div>

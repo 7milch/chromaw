@@ -292,3 +292,177 @@ def test_real_server_records_endpoint_with_token(tmp_path: Path) -> None:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
+
+
+def test_real_server_records_get_endpoint_with_token(tmp_path: Path) -> None:
+    """Full E2E: real subprocess server + real ChromaDB directory. Verifies
+    POST /api/collections/{name}/records/get (ids-based lookup) over the
+    bearer-token flow against actual data on disk."""
+    chroma_client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = chroma_client.create_collection("real_records_get")
+    embedding_dim = 4
+    ids = [str(i) for i in range(6)]
+    collection.add(
+        ids=ids,
+        documents=[f"doc-{i}" for i in range(6)],
+        metadatas=[{"idx": i} for i in range(6)],
+        embeddings=[[float(i)] * embedding_dim for i in range(6)],
+    )
+
+    chromaw_bin = Path(sys.executable).with_name("chromaw")
+    assert chromaw_bin.exists(), f"chromaw console script not found next to {sys.executable}"
+
+    proc = subprocess.Popen(
+        [str(chromaw_bin), str(tmp_path), "--no-open", "--port", "0"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    try:
+        port = _wait_for_port_line(proc)
+        base = f"http://127.0.0.1:{port}"
+
+        deadline = time.time() + 10.0
+        index_html = None
+        last_exc: Exception | None = None
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(f"{base}/", timeout=1) as resp:
+                    index_html = resp.read().decode("utf-8")
+                break
+            except (urllib.error.URLError, ConnectionError) as exc:
+                last_exc = exc
+                time.sleep(0.2)
+        assert index_html is not None, f"server never served index.html: {last_exc}"
+        token = _extract_token(index_html)
+
+        # Unauthenticated request must be rejected.
+        req = urllib.request.Request(
+            f"{base}/api/collections/real_records_get/records/get",
+            data=json.dumps({"ids": ["1"]}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            assert False, "expected 401 without a bearer token"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 401
+
+        # Authenticated ids-based lookup, default include.
+        req = urllib.request.Request(
+            f"{base}/api/collections/real_records_get/records/get",
+            data=json.dumps({"ids": ["1", "3"]}).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.code == 200
+            body = json.loads(resp.read().decode("utf-8"))
+
+        assert body["total"] == 2
+        assert {r["id"] for r in body["records"]} == {"1", "3"}
+        first = body["records"][0]
+        assert set(first.keys()) == {
+            "id",
+            "document",
+            "metadata",
+            "uri",
+            "embedding_dimension",
+            "embedding_preview",
+        }
+        assert first["document"] is not None
+        assert first["embedding_dimension"] is None  # embeddings not included by default
+
+        # include=embeddings surfaces embedding info.
+        req = urllib.request.Request(
+            f"{base}/api/collections/real_records_get/records/get",
+            data=json.dumps(
+                {"ids": ["2"], "include": ["documents", "metadatas", "uris", "embeddings"]}
+            ).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.code == 200
+            emb_body = json.loads(resp.read().decode("utf-8"))
+        assert emb_body["records"][0]["embedding_dimension"] == embedding_dim
+
+        # ids overriding limit: request more ids than the default 50-item
+        # limit would suggest a page holds, confirming limit is ignored.
+        req = urllib.request.Request(
+            f"{base}/api/collections/real_records_get/records/get",
+            data=json.dumps({"ids": ids, "limit": 1}).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.code == 200
+            all_body = json.loads(resp.read().decode("utf-8"))
+        assert all_body["total"] == 6
+        assert {r["id"] for r in all_body["records"]} == set(ids)
+
+        # Nonexistent id -> empty result, not an error.
+        req = urllib.request.Request(
+            f"{base}/api/collections/real_records_get/records/get",
+            data=json.dumps({"ids": ["does-not-exist"]}).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.code == 200
+            missing_body = json.loads(resp.read().decode("utf-8"))
+        assert missing_body["total"] == 0
+        assert missing_body["records"] == []
+
+        # Invalid include value -> 422.
+        req = urllib.request.Request(
+            f"{base}/api/collections/real_records_get/records/get",
+            data=json.dumps({"ids": ["1"], "include": ["bogus"]}).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            assert False, "expected 422 for invalid include value"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 422
+
+        # Nonexistent collection -> 404.
+        req = urllib.request.Request(
+            f"{base}/api/collections/does-not-exist/records/get",
+            data=json.dumps({"ids": ["1"]}).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            assert False, "expected 404 for nonexistent collection"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)

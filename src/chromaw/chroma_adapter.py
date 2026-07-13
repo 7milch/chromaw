@@ -116,15 +116,22 @@ class ChromaAdapter:
         self,
         name: str,
         *,
+        ids: list[str] | None = None,
         limit: int = 50,
         offset: int = 0,
         include: tuple[str, ...] = ("documents", "metadatas", "uris"),
     ) -> tuple[list[RecordInfo], int]:
         """Return a page of records for the collection named ``name``.
 
-        Returns a ``(records, total)`` tuple where ``total`` is
-        ``collection.count()`` (the collection's full record count,
-        independent of paging).
+        When ``ids`` is given, results are restricted to those ids
+        (``collection.get(ids=...)``) and paging (``limit``/``offset``) is
+        not applied by Chroma to the ids list itself. Returns a
+        ``(records, total)`` tuple where ``total`` is the number of records
+        returned (i.e. matching the given ``ids``) rather than
+        ``collection.count()`` in that case, since "the collection's full
+        record count" is not a meaningful notion of total for an ids-scoped
+        lookup; without ``ids``, ``total`` remains ``collection.count()`` as
+        before.
 
         ``embedding_dimension``/``embedding_preview`` (first 8 values) are
         only populated when ``"embeddings"`` is present in ``include``;
@@ -139,11 +146,34 @@ class ChromaAdapter:
         except Exception as exc:
             raise CollectionNotFoundError(f"collection not found: {name}") from exc
 
-        total = collection.count()
+        if ids is not None and len(ids) == 0:
+            # chromadb raises a ValueError for collection.get(ids=[]); an
+            # empty ids list unambiguously matches zero records, so return
+            # an empty page without calling into chromadb at all.
+            return [], 0
+
+        if ids is not None:
+            # chromadb raises DuplicateIDError if the same id appears more
+            # than once in the ids list; de-duplicate while preserving
+            # order so each requested id still yields exactly one record.
+            seen: set[str] = set()
+            deduped_ids: list[str] = []
+            for record_id in ids:
+                if record_id not in seen:
+                    seen.add(record_id)
+                    deduped_ids.append(record_id)
+            ids = deduped_ids
 
         get_include = [item for item in include if item != "ids"]
+        get_kwargs: dict[str, Any] = {"include": get_include}
+        if ids is not None:
+            get_kwargs["ids"] = ids
+        else:
+            get_kwargs["limit"] = limit
+            get_kwargs["offset"] = offset
+
         try:
-            result = collection.get(limit=limit, offset=offset, include=get_include)
+            result = collection.get(**get_kwargs)
         except (ValueError, TypeError, ChromaError) as exc:
             # Defensive fallback: some chromadb versions reject "uris" (or
             # other include values) in collection.get(), raising either a
@@ -157,9 +187,11 @@ class ChromaAdapter:
                 # "uris" wasn't even requested; the retry can't help.
                 raise
             try:
-                result = collection.get(limit=limit, offset=offset, include=fallback_include)
+                result = collection.get(**{**get_kwargs, "include": fallback_include})
             except Exception:
                 raise exc from None
+
+        total = len(result.get("ids") or []) if ids is not None else collection.count()
 
         ids = result.get("ids") or []
         documents = result.get("documents")

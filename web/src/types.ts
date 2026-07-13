@@ -30,3 +30,10 @@ export interface RecordsResponse {
   records: RecordInfo[];
   total: number;
 }
+
+export interface RecordsGetRequest {
+  ids?: string[];
+  limit?: number;
+  offset?: number;
+  include?: string[];
+}

@@ -261,3 +261,48 @@ def test_get_records_nonexistent_collection_raises(tmp_path: Path) -> None:
 
     with pytest.raises(CollectionNotFoundError):
         adapter.get_records("does-not-exist")
+
+
+def test_get_records_ids_filters_to_requested_records(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=[str(i) for i in range(5)],
+        documents=[f"d{i}" for i in range(5)],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total = adapter.get_records("foo", ids=["1", "3"])
+
+    assert total == 2
+    assert {r.id for r in records} == {"1", "3"}
+
+
+def test_get_records_ids_with_nonexistent_id_returns_empty(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1", "2"], documents=["a", "b"])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total = adapter.get_records("foo", ids=["does-not-exist"])
+
+    assert total == 0
+    assert records == []
+
+
+def test_get_records_ids_with_embeddings_populates_dimension_and_preview(
+    tmp_path: Path,
+) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    embedding = [float(i) for i in range(10)]
+    collection.add(ids=["1", "2"], embeddings=[embedding, [9.0] * 10])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total = adapter.get_records(
+        "foo", ids=["1"], include=("documents", "metadatas", "uris", "embeddings")
+    )
+
+    assert total == 1
+    assert records[0].embedding_dimension == 10
+    assert records[0].embedding_preview == embedding[:8]

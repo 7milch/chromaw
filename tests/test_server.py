@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 import chromaw
 from chromaw.server import create_app
 
@@ -552,3 +554,253 @@ def test_records_paging_consistency_large_collection(tmp_path: Path, make_app, m
     assert len(seen_ids) == total_count
     assert len(set(seen_ids)) == total_count
     assert set(seen_ids) == {str(i) for i in range(total_count)}
+
+
+def test_records_get_returns_only_requested_ids(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 5)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post("/api/collections/foo/records/get", json={"ids": ["1", "3"]})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 2
+    assert {record["id"] for record in body["records"]} == {"1", "3"}
+
+
+def test_records_get_nonexistent_id_returns_empty(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 3)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post("/api/collections/foo/records/get", json={"ids": ["does-not-exist"]})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 0
+    assert body["records"] == []
+
+
+def test_records_get_with_embeddings_include(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 3, with_embeddings=True)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get",
+        json={"ids": ["2"], "include": ["documents", "metadatas", "uris", "embeddings"]},
+    )
+
+    assert response.status_code == 200
+    record = response.json()["records"][0]
+    assert record["embedding_dimension"] == 2
+    assert record["embedding_preview"] == [2.0, 3.0]
+
+
+def test_records_get_nonexistent_collection_returns_404(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/does-not-exist/records/get", json={"ids": ["1"]}
+    )
+
+    assert response.status_code == 404
+
+
+def test_records_get_requires_token(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path)
+    client = make_client(app, token=None)
+
+    response = client.post("/api/collections/foo/records/get", json={"ids": ["0"]})
+
+    assert response.status_code == 401
+
+
+def test_records_get_invalid_include_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get",
+        json={"ids": ["0"], "include": ["documents", "bogus"]},
+    )
+
+    assert response.status_code == 422
+
+
+def test_records_get_empty_ids_list_returns_empty(tmp_path: Path, make_app, make_client) -> None:
+    """ids=[] is a valid (if odd) empty selection and scopes to zero
+    records with a 200. chromadb's collection.get(ids=[]) raises
+    ValueError('Expected IDs to be a non-empty list...'), so chroma_adapter
+    short-circuits and returns an empty page without calling into chromadb
+    when ids is an empty list."""
+    _add_records(tmp_path, "foo", 5)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post("/api/collections/foo/records/get", json={"ids": []})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["records"] == []
+    assert body["total"] == 0
+
+
+def test_records_get_duplicate_ids_returns_each_occurrence(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """Duplicate ids in the request body (e.g. a UI double-submitting the
+    same id) previously caused chromadb's collection.get(ids=...) to raise
+    DuplicateIDError, propagating as an unhandled 500. chroma_adapter now
+    dedupes the ids (preserving order) before calling into chromadb, so each
+    requested id is represented exactly once in the response."""
+    _add_records(tmp_path, "foo", 5)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get", json={"ids": ["1", "1", "2"]}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [r["id"] for r in body["records"]] == ["1", "2"]
+    assert body["total"] == 2
+
+
+def test_records_get_large_ids_list(tmp_path: Path, make_app, make_client) -> None:
+    """150 requested ids (> the 500 limit's usual page size, and > typical
+    default limit of 50) must all come back -- ids-based lookup bypasses
+    limit/offset entirely per the adapter's documented contract."""
+    _add_records(tmp_path, "foo", 200)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    requested_ids = [str(i) for i in range(150)]
+    response = client.post(
+        "/api/collections/foo/records/get", json={"ids": requested_ids}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 150
+    assert len(body["records"]) == 150
+    assert {record["id"] for record in body["records"]} == set(requested_ids)
+
+
+def test_records_get_ids_ignores_limit(tmp_path: Path, make_app, make_client) -> None:
+    """When ids is given, limit must be ignored (per chroma_adapter.get_records
+    docstring: 'paging (limit/offset) is not applied by Chroma to the ids list
+    itself'). Request 10 ids with a limit far below 10; all 10 must return."""
+    _add_records(tmp_path, "foo", 20)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    requested_ids = [str(i) for i in range(10)]
+    response = client.post(
+        "/api/collections/foo/records/get",
+        json={"ids": requested_ids, "limit": 1},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 10
+    assert len(body["records"]) == 10
+    assert {record["id"] for record in body["records"]} == set(requested_ids)
+
+
+def test_records_get_ids_ignores_offset(tmp_path: Path, make_app, make_client) -> None:
+    """Likewise offset must be ignored when ids is given."""
+    _add_records(tmp_path, "foo", 20)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    requested_ids = [str(i) for i in range(5)]
+    response = client.post(
+        "/api/collections/foo/records/get",
+        json={"ids": requested_ids, "offset": 100},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 5
+    assert {record["id"] for record in body["records"]} == set(requested_ids)
+
+
+def test_records_get_large_document(tmp_path: Path, make_app, make_client) -> None:
+    """A single record with a document body of ~50KB must round-trip intact
+    through the API (no truncation)."""
+    collection_name = "foo"
+    chromadb_module = __import__("chromadb")
+    client_lib = chromadb_module.PersistentClient(path=str(tmp_path))
+    collection = client_lib.create_collection(collection_name)
+    large_document = "x" * 50_000
+    collection.add(ids=["big"], documents=[large_document], metadatas=[{"idx": 0}])
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get", json={"ids": ["big"]}
+    )
+
+    assert response.status_code == 200
+    record = response.json()["records"][0]
+    assert record["document"] == large_document
+    assert len(record["document"]) == 50_000
+
+
+def test_records_get_nested_metadata_is_out_of_range(tmp_path: Path, make_app, make_client) -> None:
+    """ChromaDB metadata values must be str/int/float/bool/None (no nested
+    dict/list); attempting to add a record with nested metadata must fail at
+    the chromadb layer, not silently corrupt/flatten it. This documents that
+    'metadata がネスト JSON' is not actually representable by the current
+    chroma_adapter/records schema (RecordInfo.metadata: dict | None assumes a
+    flat dict of chromadb-primitive values), which is a spec-relevant
+    constraint rather than a chromaw bug."""
+    chromadb_module = __import__("chromadb")
+    client_lib = chromadb_module.PersistentClient(path=str(tmp_path))
+    collection = client_lib.create_collection("foo")
+
+    with pytest.raises(Exception):
+        collection.add(
+            ids=["1"],
+            documents=["doc"],
+            metadatas=[{"nested": {"a": 1}}],
+        )
+
+
+def test_records_get_ids_null_falls_back_to_paged_listing(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """ids omitted entirely (None) must behave like the paged GET endpoint,
+    honoring limit/offset and total == collection.count()."""
+    _add_records(tmp_path, "foo", 10)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get", json={"limit": 3, "offset": 0}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 10
+    assert len(body["records"]) == 3

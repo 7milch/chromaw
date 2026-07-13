@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "./api";
+import { useAppConfig } from "./AppConfigContext";
 import { exportCollectionRecords, type ExportFilters } from "./export";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import ShortcutsHelpModal from "./ShortcutsHelpModal";
 import type {
   CollectionInfo,
   CollectionsResponse,
-  HealthResponse,
   RecordInfo,
   RecordsGetRequest,
   RecordsResponse,
@@ -89,7 +89,7 @@ function summarizeMetadata(metadata: Record<string, unknown> | null): string {
 }
 
 function App() {
-  const [health, setHealth] = useState<HealthResponse | null>(null);
+  const { health, error: healthError } = useAppConfig();
   const [collections, setCollections] = useState<CollectionInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedName, setSelectedName] = useState<string | null>(null);
@@ -122,18 +122,6 @@ function App() {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    apiFetch("/api/health")
-      .then((res) => {
-        if (!res.ok) {
-          throw new Error(`request failed: ${res.status}`);
-        }
-        return res.json() as Promise<HealthResponse>;
-      })
-      .then(setHealth)
-      .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : String(err));
-      });
-
     apiFetch("/api/collections")
       .then((res) => {
         if (!res.ok) {
@@ -400,10 +388,15 @@ function App() {
         <span className="text-slate-500">|</span>
         {health && (
           <span
-            className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+            title={
               health.mode === "write"
-                ? "bg-amber-500/20 text-amber-300"
-                : "bg-emerald-500/20 text-emerald-300"
+                ? "Editing is enabled. Destructive actions require confirmation."
+                : "Read-only mode. Restart with --write to enable edits."
+            }
+            className={`rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${
+              health.mode === "write"
+                ? "bg-red-600/90 text-white ring-1 ring-red-400"
+                : "bg-slate-700 text-slate-300 ring-1 ring-slate-600"
             }`}
           >
             {health.mode}
@@ -411,8 +404,10 @@ function App() {
         )}
       </header>
 
-      {error && (
-        <p className="px-4 py-2 text-sm text-red-400">Failed to reach API: {error}</p>
+      {(error || healthError) && (
+        <p className="px-4 py-2 text-sm text-red-400">
+          Failed to reach API: {error ?? healthError}
+        </p>
       )}
 
       <div className="flex flex-1 min-h-0">

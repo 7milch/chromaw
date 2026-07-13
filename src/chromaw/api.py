@@ -15,6 +15,27 @@ router = APIRouter(prefix="/api")
 _VALID_INCLUDE_VALUES = {"documents", "metadatas", "uris", "embeddings"}
 
 
+def require_write_mode(request: Request) -> None:
+    """FastAPI dependency guarding write endpoints (technical-spec §3.2).
+
+    chromaw is safe-by-default: it starts in read-only mode unless the
+    operator passes ``--write``. Any write endpoint (record/collection
+    mutations, added from M2-2 onward) should declare
+    ``dependencies=[Depends(require_write_mode)]`` so a read-only server
+    rejects the request with a 403 before any mutation is attempted,
+    instead of relying on each handler to remember the check.
+    """
+
+    if request.app.state.mode != "write":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "chromaw is running in read-only mode; restart with --write "
+                "to enable edits."
+            ),
+        )
+
+
 def _validate_include(include_values: tuple[str, ...]) -> None:
     """Raise a 422 if any of ``include_values`` isn't a recognized field.
 

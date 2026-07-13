@@ -2,11 +2,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from chromaw import server as server_module
 from chromaw.security import generate_token
 
 _TOKEN = "test-token"
 _HOST = "127.0.0.1"
 _PORT = 8000
+
+
+class _FakePackage:
+    def __init__(self, static_dir: Path) -> None:
+        self._static_dir = static_dir
+
+    def joinpath(self, name: str) -> Path:
+        assert name == "static"
+        return self._static_dir
 
 
 def test_generate_token_returns_distinct_urlsafe_strings() -> None:
@@ -224,8 +236,16 @@ def test_get_request_has_no_cors_headers(tmp_path: Path, make_app, make_client) 
     }
 
 
-def test_index_html_contains_token_meta_tag(tmp_path: Path, make_app, make_client) -> None:
-    client = make_client(make_app(tmp_path), token=None)
+def test_index_html_contains_token_meta_tag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_app, make_client
+) -> None:
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<html><head></head><body>chromaw</body></html>")
+
+    monkeypatch.setattr(server_module, "files", lambda _pkg: _FakePackage(static_dir))
+
+    client = make_client(make_app(tmp_path / "chroma"), token=None)
 
     response = client.get("/")
 

@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "./api";
+import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
+import ShortcutsHelpModal from "./ShortcutsHelpModal";
 import type {
   CollectionInfo,
   CollectionsResponse,
@@ -108,6 +110,9 @@ function App() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailMissing, setDetailMissing] = useState(false);
+
+  const [helpOpen, setHelpOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     apiFetch("/api/health")
@@ -278,6 +283,16 @@ function App() {
   }, [selectedName, selectedRecordId]);
 
   const selected = collections?.find((c) => c.name === selectedName) ?? null;
+  const recordIds = useMemo(() => records?.map((r) => r.id) ?? [], [records]);
+
+  useKeyboardShortcuts({
+    searchInputRef,
+    recordIds,
+    selectedRecordId,
+    onSelectRecordId: setSelectedRecordId,
+    helpOpen,
+    onSetHelpOpen: setHelpOpen,
+  });
 
   function executeSearch() {
     try {
@@ -413,6 +428,7 @@ function App() {
                     <option value="document">Document</option>
                   </select>
                   <input
+                    ref={searchInputRef}
                     type="text"
                     value={searchText}
                     onChange={(e) => setSearchText(e.target.value)}
@@ -627,6 +643,8 @@ function App() {
           )}
         </aside>
       </div>
+
+      {helpOpen && <ShortcutsHelpModal onClose={() => setHelpOpen(false)} />}
     </div>
   );
 }

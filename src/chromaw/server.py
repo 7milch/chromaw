@@ -5,6 +5,7 @@ from typing import AsyncIterator, Callable, Optional
 
 from fastapi import FastAPI
 
+from chromaw.api import router as api_router
 from chromaw.chroma_adapter import ChromaAdapter
 
 
@@ -16,9 +17,9 @@ def create_app(
 ) -> FastAPI:
     """Create the chromaw FastAPI application.
 
-    Endpoints (health, collections, records, ...) are added in later
-    milestones (M0-4+). For now the app only exposes its state so that the
-    CLI can start a server that carries mode/path/adapter information.
+    API endpoints live under ``/api`` via APIRouters (see ``chromaw.api``);
+    further routers (collections, records, ...) are added in later
+    milestones (M0-5+) by including them here alongside ``api_router``.
 
     ``on_startup``, if given, is invoked once the application has finished
     starting up (e.g. after uvicorn has begun listening), which lets the CLI
@@ -37,5 +38,7 @@ def create_app(
     app.state.adapter = adapter
     app.state.mode = "write" if write else "read-only"
     app.state.path = adapter.path
+
+    app.include_router(api_router)
 
     return app

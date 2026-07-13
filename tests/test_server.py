@@ -3,6 +3,7 @@ from pathlib import Path
 import chromadb
 from fastapi.testclient import TestClient
 
+import chromaw
 from chromaw.chroma_adapter import ChromaAdapter
 from chromaw.server import create_app
 
@@ -71,3 +72,38 @@ def test_on_startup_not_required(tmp_path: Path) -> None:
         response = client.get("/")
         assert response.status_code == 404
 
+
+def test_health_read_only(tmp_path: Path) -> None:
+    adapter = _make_adapter(tmp_path)
+    app = create_app(adapter, write=False)
+    client = TestClient(app)
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "ok": True,
+        "version": chromaw.__version__,
+        "mode": "read-only",
+        "path": str(adapter.path),
+    }
+    assert Path(body["path"]).is_absolute()
+
+
+def test_health_write(tmp_path: Path) -> None:
+    adapter = _make_adapter(tmp_path)
+    app = create_app(adapter, write=True)
+    client = TestClient(app)
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "ok": True,
+        "version": chromaw.__version__,
+        "mode": "write",
+        "path": str(adapter.path),
+    }
+    assert Path(body["path"]).is_absolute()

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chromaw"
+dynamic = ["version"]
+description = "A local-first web UI to browse, search, and edit ChromaDB persistent directories."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "typer",
+    "fastapi",
+    "uvicorn",
+    "chromadb",
+    "pydantic",
+]
+
+[project.scripts]
+chromaw = "chromaw.cli:app"
+
+[tool.hatch.version]
+path = "src/chromaw/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chromaw"]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "httpx",
+]

@@ -12,7 +12,7 @@
 
 ## Milestone 0: Skeleton
 
-- [ ] M0-1: `pyproject.toml` と `src/chromaw/` パッケージ構成、Typer CLI (`chromaw ./path`) の初期化
+- [x] M0-1: `pyproject.toml` と `src/chromaw/` パッケージ構成、Typer CLI (`chromaw ./path`) の初期化 (Issue #1)
 - [ ] M0-2: `chromadb.PersistentClient(path=...)` 接続と起動時エラーハンドリング（§11.1）
 - [ ] M0-3: FastAPI サーバー起動（port 自動割当、`--host` / `--port` / `--no-open` オプション）
 - [ ] M0-4: `GET /api/health` エンドポイント

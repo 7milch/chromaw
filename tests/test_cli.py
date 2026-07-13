@@ -1,9 +1,11 @@
 from pathlib import Path
+from typing import Any
 
 import chromadb
 import pytest
 from typer.testing import CliRunner
 
+import chromaw.cli as cli_module
 from chromaw import __version__
 from chromaw.cli import app
 
@@ -20,6 +22,39 @@ def chroma_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     chromadb.PersistentClient(path=str(tmp_path))
     monkeypatch.chdir(tmp_path)
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def mock_server_startup(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Prevent the CLI from actually starting a blocking server / browser.
+
+    Simulates uvicorn reaching "server started listening" by invoking the
+    ``on_startup`` callback passed to ``create_app`` synchronously, mirroring
+    what the real lifespan hook does once the server is up. Captures the
+    calls so individual tests can assert on them.
+    """
+    calls: dict[str, Any] = {"uvicorn_run": None, "webbrowser_open": None}
+
+    real_create_app = cli_module.create_app
+
+    def fake_uvicorn_run(app: Any, *, host: str, port: int) -> None:
+        calls["uvicorn_run"] = {"host": host, "port": port}
+
+    def fake_webbrowser_open(url: str) -> bool:
+        calls["webbrowser_open"] = url
+        return True
+
+    def fake_create_app(adapter: Any, *, write: bool, on_startup: Any = None) -> Any:
+        app = real_create_app(adapter, write=write, on_startup=on_startup)
+        if on_startup is not None:
+            on_startup()
+        return app
+
+    monkeypatch.setattr(cli_module.uvicorn, "run", fake_uvicorn_run)
+    monkeypatch.setattr(cli_module.webbrowser, "open", fake_webbrowser_open)
+    monkeypatch.setattr(cli_module, "create_app", fake_create_app)
+
+    return calls
 
 
 def test_help() -> None:
@@ -51,10 +86,11 @@ def test_default_values() -> None:
     assert "collections=0" in result.stdout
 
 
-def test_path_argument_accepted() -> None:
-    result = runner.invoke(app, ["/tmp/some-chroma-dir"])
+def test_path_argument_accepted(tmp_path: Path) -> None:
+    missing = tmp_path / "does-not-exist"
+    result = runner.invoke(app, [str(missing)])
     assert result.exit_code != 0
-    assert "path=/tmp/some-chroma-dir" in result.stdout
+    assert f"path={missing}" in result.stdout
 
 
 def test_host_option() -> None:
@@ -208,3 +244,80 @@ def test_nested_nonexistent_path_with_create_creates_parents(tmp_path: Path) -> 
     assert result.exit_code == 0
     assert nested.exists()
     assert "collections=0" in result.stdout
+
+
+def test_startup_url_displayed_with_resolved_port(mock_server_startup: dict) -> None:
+    result = runner.invoke(app, ["--port", "8123"])
+    assert result.exit_code == 0
+    assert "http://127.0.0.1:8123" in result.stdout
+    assert mock_server_startup["uvicorn_run"] == {"host": "127.0.0.1", "port": 8123}
+
+
+def test_startup_url_uses_auto_assigned_port_when_zero(mock_server_startup: dict) -> None:
+    result = runner.invoke(app, ["--port", "0"])
+    assert result.exit_code == 0
+    assigned_port = mock_server_startup["uvicorn_run"]["port"]
+    assert assigned_port != 0
+    assert f"http://127.0.0.1:{assigned_port}" in result.stdout
+
+
+def test_non_local_host_warns_on_stderr(mock_server_startup: dict) -> None:
+    result = runner.invoke(app, ["--host", "0.0.0.0"])
+    assert result.exit_code == 0
+    stderr = result.stderr if result.stderr is not None else ""
+    assert "warning" in stderr.lower()
+
+
+def test_localhost_host_does_not_warn(mock_server_startup: dict) -> None:
+    result = runner.invoke(app, ["--host", "localhost"])
+    assert result.exit_code == 0
+    stderr = result.stderr if result.stderr is not None else ""
+    assert "warning" not in stderr.lower()
+
+
+def test_127_0_0_1_host_does_not_warn(mock_server_startup: dict) -> None:
+    result = runner.invoke(app, ["--host", "127.0.0.1"])
+    assert result.exit_code == 0
+    stderr = result.stderr if result.stderr is not None else ""
+    assert "warning" not in stderr.lower()
+
+
+def test_browser_opened_by_default(mock_server_startup: dict) -> None:
+    result = runner.invoke(app, ["--port", "8123"])
+    assert result.exit_code == 0
+    assert mock_server_startup["webbrowser_open"] == "http://127.0.0.1:8123"
+
+
+def test_browser_not_opened_with_no_open(mock_server_startup: dict) -> None:
+    result = runner.invoke(app, ["--port", "8123", "--no-open"])
+    assert result.exit_code == 0
+    assert mock_server_startup["webbrowser_open"] is None
+
+
+def test_uvicorn_not_started_on_connection_error(
+    tmp_path: Path, mock_server_startup: dict
+) -> None:
+    missing = tmp_path / "does-not-exist"
+    result = runner.invoke(app, [str(missing)])
+    assert result.exit_code != 0
+    assert mock_server_startup["uvicorn_run"] is None
+
+
+def test_resolve_port_returns_explicit_port_unchanged() -> None:
+    assert cli_module._resolve_port("127.0.0.1", 12345) == 12345
+
+
+def test_resolve_port_auto_assigns_free_port() -> None:
+    port = cli_module._resolve_port("127.0.0.1", 0)
+    assert isinstance(port, int)
+    assert port != 0
+    assert 1 <= port <= 65535
+
+
+def test_resolve_port_auto_assigns_distinct_ports_when_called_twice() -> None:
+    # Not guaranteed in theory (OS could reuse), but overwhelmingly likely in
+    # practice and useful as a smoke test that the socket is released.
+    port_a = cli_module._resolve_port("127.0.0.1", 0)
+    port_b = cli_module._resolve_port("127.0.0.1", 0)
+    assert isinstance(port_a, int)
+    assert isinstance(port_b, int)

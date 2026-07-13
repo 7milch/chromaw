@@ -13,6 +13,7 @@ from chromaw.errors import (
     ChromaPathNotFoundError,
     CollectionNotFoundError,
     InvalidFilterError,
+    RecordNotFoundError,
 )
 from chromaw.models import CollectionInfo, RecordInfo
 
@@ -315,4 +316,46 @@ class ChromaAdapter:
             )
 
         return records, total, has_more
+
+    def update_record(
+        self,
+        name: str,
+        record_id: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+        uri: str | None = None,
+    ) -> None:
+        """Update ``metadata`` and/or ``uri`` for a single record
+        (technical-spec §5.4, §8.3).
+
+        Only fields explicitly given (non-``None``) are passed to
+        ``collection.update()``, so omitting one leaves it untouched in
+        Chroma. Existence of ``record_id`` is checked up front via
+        ``collection.get(ids=[record_id])`` so a missing record raises
+        ``RecordNotFoundError`` instead of chromadb's update() silently
+        no-op'ing (which is chromadb's actual behavior for unknown ids).
+
+        Raises:
+            CollectionNotFoundError: no collection named ``name`` exists.
+            RecordNotFoundError: no record with id ``record_id`` exists in
+                the collection.
+        """
+        try:
+            collection = self._client.get_collection(name)
+        except Exception as exc:
+            raise CollectionNotFoundError(f"collection not found: {name}") from exc
+
+        existing = collection.get(ids=[record_id])
+        if not existing.get("ids"):
+            raise RecordNotFoundError(
+                f"record not found: {record_id!r} in collection {name!r}"
+            )
+
+        update_kwargs: dict[str, Any] = {"ids": [record_id]}
+        if metadata is not None:
+            update_kwargs["metadatas"] = [metadata]
+        if uri is not None:
+            update_kwargs["uris"] = [uri]
+
+        collection.update(**update_kwargs)
 

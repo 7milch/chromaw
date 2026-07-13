@@ -29,3 +29,7 @@ class CollectionNotFoundError(ChromawError):
 class InvalidFilterError(ChromawError):
     """Raised when ``where`` / ``where_document`` filter given to ``get_records``
     is rejected by chromadb (e.g. malformed operator, unknown field syntax)."""
+
+
+class RecordNotFoundError(ChromawError):
+    """Raised when the requested record id does not exist in the collection."""

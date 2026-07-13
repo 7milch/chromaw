@@ -40,3 +40,8 @@ export interface RecordsGetRequest {
   offset?: number;
   include?: string[];
 }
+
+export interface RecordUpdateRequest {
+  metadata?: Record<string, unknown> | null;
+  uri?: string | null;
+}

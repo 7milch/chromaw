@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from chromaw import __version__
+from chromaw.errors import RecordNotFoundError
 from chromaw.models import (
     CollectionsResponse,
     HealthResponse,
+    RecordInfo,
     RecordsGetRequest,
     RecordsResponse,
+    RecordUpdateRequest,
 )
 
 router = APIRouter(prefix="/api")
@@ -88,6 +91,35 @@ def get_records(
         name, limit=limit, offset=offset, include=include_values
     )
     return RecordsResponse(records=records, total=total, has_more=has_more)
+
+
+@router.patch(
+    "/collections/{name}/records/{record_id}",
+    response_model=RecordInfo,
+    dependencies=[Depends(require_write_mode)],
+)
+def patch_record(
+    name: str,
+    record_id: str,
+    request: Request,
+    body: RecordUpdateRequest,
+) -> RecordInfo:
+    """Update ``metadata`` and/or ``uri`` for a single record
+    (technical-spec §5.4, §8.3). M2-2 scope only; ``document`` and
+    ``embedding_mode`` are handled in M2-3.
+    """
+
+    adapter = request.app.state.adapter
+    adapter.update_record(name, record_id, metadata=body.metadata, uri=body.uri)
+
+    records, _, _ = adapter.get_records(
+        name,
+        ids=[record_id],
+        include=("documents", "metadatas", "uris"),
+    )
+    if not records:
+        raise RecordNotFoundError(f"record not found: {record_id!r} in collection {name!r}")
+    return records[0]
 
 
 @router.post("/collections/{name}/records/get", response_model=RecordsResponse)

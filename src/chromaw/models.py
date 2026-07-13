@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class HealthResponse(BaseModel):
@@ -67,3 +67,47 @@ class RecordsGetRequest(BaseModel):
     include: list[str] = Field(
         default_factory=lambda: ["documents", "metadatas", "uris"]
     )
+
+
+class RecordUpdateRequest(BaseModel):
+    """Request body for ``PATCH /api/collections/{name}/records/{id}``
+    (technical-spec §5.4, §8.3).
+
+    M2-2 accepts only ``metadata`` and ``uri``; ``document``/``embedding_mode``
+    are deferred to M2-3. At least one of ``metadata``/``uri`` must be given
+    (both ``None`` is rejected with 422, since it would be a no-op PATCH).
+
+    chromadb metadata values must be a flat mapping of ``str``/``int``/
+    ``float``/``bool`` -- nested dicts/lists and ``None`` values are rejected
+    with 422 rather than silently reaching chromadb and failing there.
+
+    chromadb's ``collection.update`` merges the given ``metadata`` into the
+    existing metadata rather than replacing it, so an empty ``{}`` would be a
+    silent no-op; it is rejected with 422 requiring a non-empty mapping.
+    """
+
+    metadata: dict | None = None
+    uri: str | None = None
+
+    @model_validator(mode="after")
+    def _check_at_least_one_field(self) -> "RecordUpdateRequest":
+        if self.metadata is None and self.uri is None:
+            raise ValueError("at least one of metadata/uri must be given")
+        return self
+
+    @model_validator(mode="after")
+    def _check_metadata_is_flat_scalar_dict(self) -> "RecordUpdateRequest":
+        if self.metadata is None:
+            return self
+        if not self.metadata:
+            raise ValueError("metadata must be a non-empty mapping if given")
+        for key, value in self.metadata.items():
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (str, int, float)):
+                continue
+            raise ValueError(
+                f"metadata value for key {key!r} must be a str, int, float, "
+                f"or bool (got {type(value).__name__})"
+            )
+        return self

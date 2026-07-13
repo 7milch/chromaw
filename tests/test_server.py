@@ -1128,3 +1128,232 @@ def test_records_get_where_paging_has_more_transitions_and_reaches_all_matches(
     assert has_more_flags == [True, True, False]
     assert len(seen_ids) == 120
     assert set(seen_ids) == {str(i) for i in range(120)}
+
+
+def test_patch_record_metadata_reflected_in_get(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 3)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/1", json={"metadata": {"idx": 99, "tag": "x"}}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["metadata"] == {"idx": 99, "tag": "x"}
+
+    get_response = client.get("/api/collections/foo/records?limit=10")
+    updated = next(r for r in get_response.json()["records"] if r["id"] == "1")
+    assert updated["metadata"] == {"idx": 99, "tag": "x"}
+
+
+def test_patch_record_uri_only_update(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/0", json={"uri": "file:///new-uri"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["uri"] == "file:///new-uri"
+    # metadata untouched
+    assert body["metadata"] == {"idx": 0}
+
+
+def test_patch_record_read_only_returns_403(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=False)
+    client = make_client(app)
+
+    response = client.patch("/api/collections/foo/records/0", json={"metadata": {"a": 1}})
+
+    assert response.status_code == 403
+
+
+def test_patch_record_without_token_returns_401(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app, token=None)
+
+    response = client.patch("/api/collections/foo/records/0", json={"metadata": {"a": 1}})
+
+    assert response.status_code == 401
+
+
+def test_patch_record_nonexistent_record_returns_404(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/does-not-exist", json={"metadata": {"a": 1}}
+    )
+
+    assert response.status_code == 404
+
+
+def test_patch_record_nonexistent_collection_returns_404(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/missing/records/0", json={"metadata": {"a": 1}}
+    )
+
+    assert response.status_code == 404
+
+
+def test_patch_record_nested_dict_metadata_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/0", json={"metadata": {"a": {"nested": 1}}}
+    )
+
+    assert response.status_code == 422
+
+
+def test_patch_record_list_value_metadata_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch("/api/collections/foo/records/0", json={"metadata": {"a": [1, 2]}})
+
+    assert response.status_code == 422
+
+
+def test_patch_record_both_metadata_and_uri_none_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch("/api/collections/foo/records/0", json={})
+
+    assert response.status_code == 422
+
+
+def test_patch_record_empty_metadata_dict_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    """``{}`` is rejected by ``RecordUpdateRequest`` validation with a 422
+    before it ever reaches chromadb's ``collection.update()`` (which itself
+    would reject an empty metadata dict with a ``ValueError``, and which also
+    merges rather than replaces metadata, so an empty dict would otherwise be
+    a silent no-op). See
+    test_chroma_adapter.test_update_record_empty_metadata_dict_raises_value_error
+    for the adapter-level equivalent."""
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch("/api/collections/foo/records/0", json={"metadata": {}})
+
+    assert response.status_code == 422
+
+
+def test_patch_record_bool_metadata_value_round_trips_as_bool(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """``bool`` is a subclass of ``int``; make sure the request validator's
+    per-value type check (which special-cases ``bool`` before the
+    ``int``/``float`` branch) doesn't coerce it, and that it round-trips
+    as a JSON bool through the PATCH response."""
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/0", json={"metadata": {"flag": True, "off": False}}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["metadata"]["flag"] is True
+    assert body["metadata"]["off"] is False
+
+
+def test_patch_record_empty_string_uri(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch("/api/collections/foo/records/0", json={"uri": ""})
+
+    assert response.status_code == 200
+    assert response.json()["uri"] == ""
+
+
+def test_patch_record_non_ascii_metadata_value(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/0", json={"metadata": {"name": "日本語テスト🎉"}}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["metadata"]["name"] == "日本語テスト🎉"
+
+
+def test_patch_record_large_metadata(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    large_metadata = {f"k{i}": "v" * 100 for i in range(500)}
+    response = client.patch(
+        "/api/collections/foo/records/0", json={"metadata": large_metadata}
+    )
+
+    assert response.status_code == 200
+    # chromadb metadata update merges into the record's existing metadata
+    # (here {"idx": 0} from _add_records) rather than replacing it.
+    assert response.json()["metadata"] == {"idx": 0, **large_metadata}
+
+
+def test_patch_record_persists_across_app_instances(tmp_path: Path, make_app, make_client) -> None:
+    """A PATCH via one app/adapter instance must be durably visible to a
+    freshly-created app/adapter over the same persistent directory."""
+    _add_records(tmp_path, "foo", 1)
+
+    app1 = make_app(tmp_path, write=True)
+    client1 = make_client(app1)
+    response = client1.patch(
+        "/api/collections/foo/records/0",
+        json={"metadata": {"idx": 0, "updated": True}, "uri": "file:///new"},
+    )
+    assert response.status_code == 200
+
+    app2 = make_app(tmp_path, write=False)
+    client2 = make_client(app2)
+    get_response = client2.get("/api/collections/foo/records?limit=10")
+    updated = next(r for r in get_response.json()["records"] if r["id"] == "0")
+    assert updated["metadata"] == {"idx": 0, "updated": True}
+    assert updated["uri"] == "file:///new"

@@ -10,6 +10,7 @@ from chromaw.errors import (
     ChromaPathNotFoundError,
     CollectionNotFoundError,
     InvalidFilterError,
+    RecordNotFoundError,
 )
 
 
@@ -685,3 +686,131 @@ def test_get_records_where_paging_has_more_false_at_exact_multiple_boundary(
     assert {r.id for r in records_page1} | {r.id for r in records_page2} == {
         str(i) for i in range(100)
     }
+
+
+def test_update_record_metadata_reflected_in_get(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], metadatas=[{"a": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    adapter.update_record("foo", "1", metadata={"a": 2, "b": "x"})
+
+    records, _, _ = adapter.get_records("foo", ids=["1"])
+    assert records[0].metadata == {"a": 2, "b": "x"}
+
+
+def test_update_record_nonexistent_id_raises(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    client.create_collection("foo")
+
+    adapter = ChromaAdapter.open(tmp_path)
+
+    with pytest.raises(RecordNotFoundError):
+        adapter.update_record("foo", "missing", metadata={"a": 1})
+
+
+def test_update_record_empty_metadata_dict_raises_value_error(tmp_path: Path) -> None:
+    """chromadb's ``collection.update()`` rejects an empty metadata dict
+    outright (``ValueError: Expected metadata to be a non-empty dict``).
+
+    ``{}`` is not ``None``, so it passes through ``update_record``'s
+    ``metadata is not None`` check and reaches chromadb, which raises.
+    Pinning this so a chromadb upgrade that changes the behavior is
+    noticed. Note the API layer (``RecordUpdateRequest``) now rejects an
+    empty ``metadata`` dict with a 422 before it would ever reach the
+    adapter (see test_server.py); this test exercises the adapter
+    directly, bypassing that validation, to confirm chromadb's own
+    behavior."""
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], metadatas=[{"a": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+
+    with pytest.raises(ValueError, match="non-empty dict"):
+        adapter.update_record("foo", "1", metadata={})
+
+
+def test_update_record_bool_metadata_value_preserved_as_bool(tmp_path: Path) -> None:
+    """``bool`` is a subclass of ``int`` in Python; make sure a bool
+    metadata value round-trips as an actual bool and not ``1``/``0``."""
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], metadatas=[{"a": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    adapter.update_record("foo", "1", metadata={"flag": True, "off": False})
+
+    records, _, _ = adapter.get_records("foo", ids=["1"])
+    metadata = records[0].metadata
+    assert metadata["flag"] is True
+    assert metadata["off"] is False
+
+
+def test_update_record_empty_string_uri(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], uris=["file:///old"])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    adapter.update_record("foo", "1", uri="")
+
+    records, _, _ = adapter.get_records("foo", ids=["1"])
+    assert records[0].uri == ""
+
+
+def test_update_record_non_ascii_metadata_value(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], metadatas=[{"a": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    adapter.update_record("foo", "1", metadata={"name": "日本語テスト🎉"})
+
+    # chromadb's metadata update merges into the existing dict rather than
+    # replacing it wholesale, so the original "a" key survives alongside
+    # the new "name" key.
+    records, _, _ = adapter.get_records("foo", ids=["1"])
+    assert records[0].metadata == {"a": 1, "name": "日本語テスト🎉"}
+
+
+def test_update_record_large_metadata(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], metadatas=[{"a": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    large_metadata = {f"k{i}": "v" * 100 for i in range(500)}
+    adapter.update_record("foo", "1", metadata=large_metadata)
+
+    # merge semantics (see non-ascii test above): original "a" key survives.
+    records, _, _ = adapter.get_records("foo", ids=["1"])
+    assert records[0].metadata == {"a": 1, **large_metadata}
+
+
+# Note (no test needed): ``update_record`` does an existence pre-check via
+# ``collection.get(ids=[record_id])`` followed by ``collection.update()``.
+# There is a TOCTOU window between the two calls (e.g. concurrent delete of
+# the same id) where the pre-check could pass but the update race with a
+# deletion. This is accepted as out of scope per the M2-2 spec review --
+# chromadb's persistent client is not designed for concurrent multi-writer
+# access in the first place, and testing the race deterministically would
+# require intrusive mocking that doesn't reflect real chromadb internals.
+
+
+def test_update_record_persists_across_adapter_instances(tmp_path: Path) -> None:
+    """Updates written by one ``ChromaAdapter`` instance must be visible
+    to a freshly-opened instance against the same persistent directory
+    (i.e. the update is actually durable, not just cached in-process)."""
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], metadatas=[{"a": 1}])
+
+    adapter1 = ChromaAdapter.open(tmp_path)
+    adapter1.update_record("foo", "1", metadata={"a": 2, "b": "new"}, uri="file:///new")
+
+    adapter2 = ChromaAdapter.open(tmp_path)
+    records, _, _ = adapter2.get_records("foo", ids=["1"])
+    assert records[0].metadata == {"a": 2, "b": "new"}
+    assert records[0].uri == "file:///new"

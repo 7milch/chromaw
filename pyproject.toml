@@ -27,6 +27,11 @@ artifacts = ["src/chromaw/static/**"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chromaw"]
+# src/chromaw/static/.gitkeep exists only to keep the (otherwise-empty,
+# build-time-populated) static/ dir tracked in git; it is not a real asset.
+# It is excluded here so it doesn't collide with the force-include below,
+# which hatchling forbids (a path may only be added to the wheel once).
+exclude = ["src/chromaw/static/.gitkeep"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/chromaw/static" = "chromaw/static"

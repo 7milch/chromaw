@@ -3,6 +3,7 @@ import { apiFetch } from "./api";
 import { useAppConfig } from "./AppConfigContext";
 import { exportCollectionRecords, type ExportFilters } from "./export";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
+import MetadataEditor from "./MetadataEditor";
 import ShortcutsHelpModal from "./ShortcutsHelpModal";
 import type {
   CollectionInfo,
@@ -89,7 +90,7 @@ function summarizeMetadata(metadata: Record<string, unknown> | null): string {
 }
 
 function App() {
-  const { health, error: healthError } = useAppConfig();
+  const { health, error: healthError, isWriteMode } = useAppConfig();
   const [collections, setCollections] = useState<CollectionInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedName, setSelectedName] = useState<string | null>(null);
@@ -233,6 +234,11 @@ function App() {
 
   // Fetch full detail (including embeddings) for the selected record.
   // Same out-of-order-response guard as the records list fetch above.
+  // ``refreshTick`` is bumped after a successful metadata/uri edit so this
+  // effect re-runs against the same selectedRecordId to pull the freshly
+  // updated record.
+  const [refreshTick, setRefreshTick] = useState(0);
+
   useEffect(() => {
     setDetailRecord(null);
     setDetailError(null);
@@ -275,7 +281,7 @@ function App() {
     return () => {
       ignore = true;
     };
-  }, [selectedName, selectedRecordId]);
+  }, [selectedName, selectedRecordId, refreshTick]);
 
   const selected = collections?.find((c) => c.name === selectedName) ?? null;
   const recordIds = useMemo(() => records?.map((r) => r.id) ?? [], [records]);
@@ -700,14 +706,22 @@ function App() {
                 </pre>
               </div>
 
-              <div>
-                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  metadata
-                </h3>
-                <pre className="max-h-64 overflow-auto rounded bg-slate-900 p-2 font-mono text-xs text-slate-300">
-                  {formatMetadataJson(detailRecord.metadata)}
-                </pre>
-              </div>
+              {isWriteMode ? (
+                <MetadataEditor
+                  collectionName={selectedName!}
+                  record={detailRecord}
+                  onSaved={() => setRefreshTick((t) => t + 1)}
+                />
+              ) : (
+                <div>
+                  <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    metadata
+                  </h3>
+                  <pre className="max-h-64 overflow-auto rounded bg-slate-900 p-2 font-mono text-xs text-slate-300">
+                    {formatMetadataJson(detailRecord.metadata)}
+                  </pre>
+                </div>
+              )}
 
               <div>
                 <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">

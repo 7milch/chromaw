@@ -20,3 +20,7 @@ class ChromaInvalidDirectoryError(ChromawError):
     "chroma.sqlite3 present but unreadable" (corrupted, or created by an
     incompatible chromadb version) cases.
     """
+
+
+class CollectionNotFoundError(ChromawError):
+    """Raised when the requested collection does not exist in the ChromaDB directory."""

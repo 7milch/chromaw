@@ -239,3 +239,316 @@ def test_collections_response_keys_match_spec(tmp_path: Path, make_app, make_cli
     assert set(body.keys()) == {"collections"}
     info = body["collections"][0]
     assert set(info.keys()) == {"id", "name", "count", "metadata", "dimension"}
+
+
+def _add_records(tmp_path: Path, name: str, count: int, *, with_embeddings: bool = False):
+    import chromadb
+
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client_lib.create_collection(name)
+    ids = [str(i) for i in range(count)]
+    documents = [f"doc-{i}" for i in range(count)]
+    metadatas = [{"idx": i} for i in range(count)]
+    kwargs = {"ids": ids, "documents": documents, "metadatas": metadatas}
+    if with_embeddings:
+        kwargs["embeddings"] = [[float(i), float(i) + 1] for i in range(count)]
+    collection.add(**kwargs)
+    return collection
+
+
+def test_records_returns_schema(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 3)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/foo/records")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 3
+    assert len(body["records"]) == 3
+    record = body["records"][0]
+    assert set(record.keys()) == {
+        "id",
+        "document",
+        "metadata",
+        "uri",
+        "embedding_dimension",
+        "embedding_preview",
+    }
+
+
+def test_records_paging_limit(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 10)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/foo/records?limit=4&offset=0")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 10
+    assert len(body["records"]) == 4
+
+
+def test_records_paging_offset_beyond_total_is_empty(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 3)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/foo/records?limit=50&offset=100")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 3
+    assert body["records"] == []
+
+
+def test_records_include_embeddings(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1, with_embeddings=True)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get(
+        "/api/collections/foo/records?include=documents,metadatas,uris,embeddings"
+    )
+
+    assert response.status_code == 200
+    record = response.json()["records"][0]
+    assert record["embedding_dimension"] == 2
+    assert record["embedding_preview"] == [0.0, 1.0]
+
+
+def test_records_without_embeddings_include_has_none_dimension(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1, with_embeddings=True)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/foo/records")
+
+    assert response.status_code == 200
+    record = response.json()["records"][0]
+    assert record["embedding_dimension"] is None
+    assert record["embedding_preview"] is None
+
+
+def test_records_nonexistent_collection_returns_404(tmp_path: Path, make_app, make_client) -> None:
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/does-not-exist/records")
+
+    assert response.status_code == 404
+
+
+def test_records_limit_out_of_range_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    assert client.get("/api/collections/foo/records?limit=0").status_code == 422
+    assert client.get("/api/collections/foo/records?limit=501").status_code == 422
+
+
+def test_records_negative_offset_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/foo/records?offset=-1")
+
+    assert response.status_code == 422
+
+
+def test_records_invalid_include_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/foo/records?include=documents,bogus")
+
+    assert response.status_code == 422
+
+
+def test_records_requires_token(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path)
+    client = make_client(app, token=None)
+
+    response = client.get("/api/collections/foo/records")
+
+    assert response.status_code == 401
+
+
+def test_records_offset_equal_to_total_is_empty(tmp_path: Path, make_app, make_client) -> None:
+    """offset == total (not beyond) must yield an empty page, not an error."""
+    _add_records(tmp_path, "foo", 5)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/foo/records?limit=10&offset=5")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 5
+    assert body["records"] == []
+
+
+def test_records_limit_boundary_min(tmp_path: Path, make_app, make_client) -> None:
+    """limit=1 (the minimum allowed) returns exactly one record."""
+    _add_records(tmp_path, "foo", 5)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/foo/records?limit=1&offset=0")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 5
+    assert len(body["records"]) == 1
+
+
+def test_records_limit_boundary_max(tmp_path: Path, make_app, make_client) -> None:
+    """limit=500 (the maximum allowed) succeeds and is capped by total when
+    fewer records exist."""
+    _add_records(tmp_path, "foo", 10)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/foo/records?limit=500&offset=0")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 10
+    assert len(body["records"]) == 10
+
+
+def test_records_include_embeddings_only(tmp_path: Path, make_app, make_client) -> None:
+    """include=embeddings alone must still return embedding info, and the
+    other fields (document/metadata/uri) must be None since they were not
+    requested."""
+    _add_records(tmp_path, "foo", 1, with_embeddings=True)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/foo/records?include=embeddings")
+
+    assert response.status_code == 200
+    record = response.json()["records"][0]
+    assert record["embedding_dimension"] == 2
+    assert record["embedding_preview"] == [0.0, 1.0]
+    assert record["document"] is None
+    assert record["metadata"] is None
+    assert record["uri"] is None
+
+
+def test_records_document_metadata_uri_none(tmp_path: Path, make_app, make_client) -> None:
+    """A record added with no document/metadata/uri (only id + embedding)
+    must surface those fields as null, not omitted or coerced."""
+    import chromadb
+
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client_lib.create_collection("bare")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]])
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/bare/records")
+
+    assert response.status_code == 200
+    record = response.json()["records"][0]
+    assert record["id"] == "1"
+    assert record["document"] is None
+    assert record["metadata"] is None
+    assert record["uri"] is None
+
+
+def test_records_empty_collection(tmp_path: Path, make_app, make_client) -> None:
+    """A collection with zero records returns total=0 and an empty list,
+    not an error."""
+    import chromadb
+
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("empty")
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/empty/records")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 0
+    assert body["records"] == []
+
+
+def test_records_non_ascii_metadata(tmp_path: Path, make_app, make_client) -> None:
+    """Non-ASCII characters (Japanese, emoji) in document/metadata round-trip
+    correctly through JSON, without mangling or escaping artifacts."""
+    import chromadb
+
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client_lib.create_collection("intl")
+    collection.add(
+        ids=["1"],
+        documents=["こんにちは世界 🌍"],
+        metadatas=[{"source": "日本語ファイル.txt", "emoji": "🔥"}],
+    )
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/intl/records")
+
+    assert response.status_code == 200
+    record = response.json()["records"][0]
+    assert record["document"] == "こんにちは世界 🌍"
+    assert record["metadata"] == {"source": "日本語ファイル.txt", "emoji": "🔥"}
+
+
+def test_records_paging_consistency_large_collection(tmp_path: Path, make_app, make_client) -> None:
+    """Paging through a 500-record collection page by page (limit=50) must
+    return every id exactly once: no duplicates, no gaps, and the union must
+    match the full set of ids added."""
+    total_count = 500
+    _add_records(tmp_path, "big", total_count)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    limit = 50
+    seen_ids: list[str] = []
+    offset = 0
+    while True:
+        response = client.get(f"/api/collections/big/records?limit={limit}&offset={offset}")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == total_count
+        page_records = body["records"]
+        if not page_records:
+            break
+        seen_ids.extend(record["id"] for record in page_records)
+        offset += limit
+        if offset > total_count + limit:
+            # Safety valve against an infinite loop if pagination is broken.
+            break
+
+    assert len(seen_ids) == total_count
+    assert len(set(seen_ids)) == total_count
+    assert set(seen_ids) == {str(i) for i in range(total_count)}

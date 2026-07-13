@@ -16,3 +16,17 @@ export interface CollectionInfo {
 export interface CollectionsResponse {
   collections: CollectionInfo[];
 }
+
+export interface RecordInfo {
+  id: string;
+  document: string | null;
+  metadata: Record<string, unknown> | null;
+  uri: string | null;
+  embedding_dimension: number | null;
+  embedding_preview: number[] | null;
+}
+
+export interface RecordsResponse {
+  records: RecordInfo[];
+  total: number;
+}

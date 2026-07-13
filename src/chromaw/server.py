@@ -4,12 +4,13 @@ from contextlib import asynccontextmanager
 from importlib.resources import files
 from typing import AsyncIterator, Callable, Optional
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from chromaw.api import router as api_router
 from chromaw.chroma_adapter import ChromaAdapter
+from chromaw.errors import CollectionNotFoundError
 from chromaw.security import SecurityMiddleware, generate_token
 
 
@@ -70,6 +71,12 @@ def create_app(
     app.state.token = resolved_token
 
     app.add_middleware(SecurityMiddleware, token=resolved_token, host=host, port=port)
+
+    @app.exception_handler(CollectionNotFoundError)
+    async def _collection_not_found_handler(
+        _: Request, exc: CollectionNotFoundError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
 
     app.include_router(api_router)
 

@@ -5,13 +5,15 @@ from pathlib import Path
 from typing import Any
 
 import chromadb
+from chromadb.errors import ChromaError
 
 from chromaw.errors import (
     ChromaEmptyDirectoryError,
     ChromaInvalidDirectoryError,
     ChromaPathNotFoundError,
+    CollectionNotFoundError,
 )
-from chromaw.models import CollectionInfo
+from chromaw.models import CollectionInfo, RecordInfo
 
 _SQLITE_FILENAME = "chroma.sqlite3"
 
@@ -109,3 +111,85 @@ class ChromaAdapter:
                 )
             )
         return result
+
+    def get_records(
+        self,
+        name: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        include: tuple[str, ...] = ("documents", "metadatas", "uris"),
+    ) -> tuple[list[RecordInfo], int]:
+        """Return a page of records for the collection named ``name``.
+
+        Returns a ``(records, total)`` tuple where ``total`` is
+        ``collection.count()`` (the collection's full record count,
+        independent of paging).
+
+        ``embedding_dimension``/``embedding_preview`` (first 8 values) are
+        only populated when ``"embeddings"`` is present in ``include``;
+        callers that don't need them can omit it to avoid the extra cost of
+        fetching embedding vectors.
+
+        Raises:
+            CollectionNotFoundError: no collection named ``name`` exists.
+        """
+        try:
+            collection = self._client.get_collection(name)
+        except Exception as exc:
+            raise CollectionNotFoundError(f"collection not found: {name}") from exc
+
+        total = collection.count()
+
+        get_include = [item for item in include if item != "ids"]
+        try:
+            result = collection.get(limit=limit, offset=offset, include=get_include)
+        except (ValueError, TypeError, ChromaError) as exc:
+            # Defensive fallback: some chromadb versions reject "uris" (or
+            # other include values) in collection.get(), raising either a
+            # plain ValueError/TypeError or a chromadb-specific error (e.g.
+            # InvalidArgumentError, which subclasses ChromaError). Retry
+            # without "uris" rather than failing the whole request; if the
+            # fallback also fails, surface the original error instead of the
+            # fallback's (usually less informative) one.
+            fallback_include = [item for item in get_include if item != "uris"]
+            if fallback_include == get_include:
+                # "uris" wasn't even requested; the retry can't help.
+                raise
+            try:
+                result = collection.get(limit=limit, offset=offset, include=fallback_include)
+            except Exception:
+                raise exc from None
+
+        ids = result.get("ids") or []
+        documents = result.get("documents")
+        metadatas = result.get("metadatas")
+        uris = result.get("uris")
+        embeddings = result.get("embeddings") if "embeddings" in include else None
+
+        records: list[RecordInfo] = []
+        for i, record_id in enumerate(ids):
+            document = documents[i] if documents is not None else None
+            metadata = metadatas[i] if metadatas is not None else None
+            uri = uris[i] if uris is not None else None
+
+            embedding_dimension: int | None = None
+            embedding_preview: list[float] | None = None
+            if embeddings is not None and embeddings[i] is not None:
+                embedding = list(embeddings[i])
+                embedding_dimension = len(embedding)
+                embedding_preview = embedding[:8]
+
+            records.append(
+                RecordInfo(
+                    id=str(record_id),
+                    document=document,
+                    metadata=metadata,
+                    uri=uri,
+                    embedding_dimension=embedding_dimension,
+                    embedding_preview=embedding_preview,
+                )
+            )
+
+        return records, total
+

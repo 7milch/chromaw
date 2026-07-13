@@ -63,10 +63,10 @@ def get_records(
     _validate_include(include_values)
 
     adapter = request.app.state.adapter
-    records, total = adapter.get_records(
+    records, total, has_more = adapter.get_records(
         name, limit=limit, offset=offset, include=include_values
     )
-    return RecordsResponse(records=records, total=total)
+    return RecordsResponse(records=records, total=total, has_more=has_more)
 
 
 @router.post("/collections/{name}/records/get", response_model=RecordsResponse)
@@ -75,21 +75,21 @@ def post_records_get(
     request: Request,
     body: RecordsGetRequest,
 ) -> RecordsResponse:
-    """Look up records by id (technical-spec §5.4, §6.2, §8.3).
-
-    Minimal ids-based lookup used by the record detail view; ``where`` /
-    ``where_document`` filtering is added in M1-4.
+    """Look up records by id, ``where``, and/or ``where_document``
+    (technical-spec §5.4, §5.5, §6.2, §8.3).
     """
 
     include_values = tuple(body.include)
     _validate_include(include_values)
 
     adapter = request.app.state.adapter
-    records, total = adapter.get_records(
+    records, total, has_more = adapter.get_records(
         name,
         ids=body.ids,
+        where=body.where,
+        where_document=body.where_document,
         limit=body.limit,
         offset=body.offset,
         include=include_values,
     )
-    return RecordsResponse(records=records, total=total)
+    return RecordsResponse(records=records, total=total, has_more=has_more)

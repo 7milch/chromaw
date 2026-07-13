@@ -804,3 +804,327 @@ def test_records_get_ids_null_falls_back_to_paged_listing(
     body = response.json()
     assert body["total"] == 10
     assert len(body["records"]) == 3
+
+
+def test_records_get_where_returns_matching_records(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 5)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get", json={"where": {"idx": 2}}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {record["id"] for record in body["records"]} == {"2"}
+
+
+def test_records_get_where_document_returns_matching_records(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 5)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get",
+        json={"where_document": {"$contains": "doc-3"}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {record["id"] for record in body["records"]} == {"3"}
+
+
+def test_records_get_invalid_where_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 3)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get",
+        json={"where": {"idx": {"$badop": 1}}},
+    )
+
+    assert response.status_code == 422
+
+
+def test_records_get_where_requires_token(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 3)
+
+    app = make_app(tmp_path)
+    client = make_client(app, token=None)
+
+    response = client.post(
+        "/api/collections/foo/records/get", json={"where": {"idx": 0}}
+    )
+
+    assert response.status_code == 401
+
+
+def test_records_get_where_and_operator_returns_matching_records(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 5)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get",
+        json={"where": {"$and": [{"idx": {"$gte": 1}}, {"idx": {"$lte": 3}}]}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {record["id"] for record in body["records"]} == {"1", "2", "3"}
+
+
+def test_records_get_where_or_operator_returns_matching_records(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 5)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get",
+        json={"where": {"$or": [{"idx": 0}, {"idx": 4}]}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {record["id"] for record in body["records"]} == {"0", "4"}
+
+
+def test_records_get_where_in_operator_returns_matching_records(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 5)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get",
+        json={"where": {"idx": {"$in": [1, 3]}}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {record["id"] for record in body["records"]} == {"1", "3"}
+
+
+def test_records_get_where_numeric_value_returns_matching_records(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 5)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get", json={"where": {"idx": 2}}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["records"][0]["metadata"]["idx"] == 2
+
+
+def test_records_get_where_bool_value_returns_matching_records(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    import chromadb
+
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client_lib.create_collection("foo")
+    collection.add(
+        ids=["1", "2"],
+        documents=["a", "b"],
+        metadatas=[{"active": True}, {"active": False}],
+    )
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get", json={"where": {"active": True}}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {record["id"] for record in body["records"]} == {"1"}
+
+
+def test_records_get_where_document_contains_empty_string_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """chromadb rejects an empty-string $contains operand; the API surfaces
+    this as a 422 InvalidFilterError, not a 200 "matches everything"."""
+    _add_records(tmp_path, "foo", 3)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get",
+        json={"where_document": {"$contains": ""}},
+    )
+
+    assert response.status_code == 422
+
+
+def test_records_get_where_and_where_document_combined(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 5)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get",
+        json={"where": {"idx": 3}, "where_document": {"$contains": "doc-3"}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {record["id"] for record in body["records"]} == {"3"}
+
+
+def test_records_get_where_and_ids_combined(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 5)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get",
+        json={"ids": ["0", "1", "2"], "where": {"idx": {"$gte": 1}}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {record["id"] for record in body["records"]} == {"1", "2"}
+
+
+def test_records_get_where_zero_matches_returns_empty(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 3)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get", json={"where": {"idx": 999}}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["records"] == []
+    assert body["total"] == 0
+
+
+def test_records_get_where_offset_beyond_matches_returns_empty_records(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 3)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get",
+        json={"where": {"idx": {"$gte": 0}}, "limit": 10, "offset": 100},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["records"] == []
+    # Documented approximation: total tracks offset+len(records) while
+    # filtering, not the true match count.
+    assert body["total"] == 100
+
+
+def test_records_paging_has_more_true_then_false(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 10)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response1 = client.get("/api/collections/foo/records?limit=4&offset=0")
+    assert response1.status_code == 200
+    body1 = response1.json()
+    assert body1["has_more"] is True
+
+    response2 = client.get("/api/collections/foo/records?limit=4&offset=8")
+    assert response2.status_code == 200
+    body2 = response2.json()
+    assert body2["has_more"] is False
+
+
+def test_records_get_ids_has_more_always_false(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 10)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/get",
+        json={"ids": [str(i) for i in range(10)], "limit": 1},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["has_more"] is False
+    assert body["total"] == 10
+
+
+def test_records_get_where_paging_has_more_transitions_and_reaches_all_matches(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """120 records match a where filter with limit=50: has_more must go
+    True -> True -> False across pages, and paging through must reach every
+    matching record exactly once."""
+    _add_records(tmp_path, "foo", 200)
+
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    limit = 50
+    offset = 0
+    seen_ids: list[str] = []
+    has_more_flags: list[bool] = []
+    for _ in range(10):
+        response = client.post(
+            "/api/collections/foo/records/get",
+            json={"where": {"idx": {"$lt": 120}}, "limit": limit, "offset": offset},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        seen_ids.extend(record["id"] for record in body["records"])
+        has_more_flags.append(body["has_more"])
+        if not body["has_more"]:
+            break
+        offset += limit
+
+    assert has_more_flags == [True, True, False]
+    assert len(seen_ids) == 120
+    assert set(seen_ids) == {str(i) for i in range(120)}

@@ -12,6 +12,7 @@ from chromaw.errors import (
     ChromaInvalidDirectoryError,
     ChromaPathNotFoundError,
     CollectionNotFoundError,
+    InvalidFilterError,
 )
 from chromaw.models import CollectionInfo, RecordInfo
 
@@ -117,21 +118,59 @@ class ChromaAdapter:
         name: str,
         *,
         ids: list[str] | None = None,
+        where: dict | None = None,
+        where_document: dict | None = None,
         limit: int = 50,
         offset: int = 0,
         include: tuple[str, ...] = ("documents", "metadatas", "uris"),
-    ) -> tuple[list[RecordInfo], int]:
+    ) -> tuple[list[RecordInfo], int, bool]:
         """Return a page of records for the collection named ``name``.
 
-        When ``ids`` is given, results are restricted to those ids
-        (``collection.get(ids=...)``) and paging (``limit``/``offset``) is
-        not applied by Chroma to the ids list itself. Returns a
-        ``(records, total)`` tuple where ``total`` is the number of records
-        returned (i.e. matching the given ``ids``) rather than
+        When ``ids`` is given (and neither ``where`` nor ``where_document``
+        is), results are restricted to those ids (``collection.get(ids=...)``)
+        and paging (``limit``/``offset``) is not applied by Chroma to the ids
+        list itself -- all matching records are returned in one page, and
+        ``has_more`` is always ``False`` in that case. Returns a
+        ``(records, total, has_more)`` tuple where ``total`` is the number of
+        records returned (i.e. matching the given ``ids``) rather than
         ``collection.count()`` in that case, since "the collection's full
         record count" is not a meaningful notion of total for an ids-scoped
         lookup; without ``ids``, ``total`` remains ``collection.count()`` as
         before.
+
+        ``where`` / ``where_document`` (technical-spec §5.5 1-3, §8.3) are
+        passed straight through to ``collection.get()`` and may be combined
+        with ``ids`` (chromadb ANDs all given filters together). chromadb
+        has no way to cheaply count "records matching this filter" (its
+        ``count()`` ignores filters), so when either is given ``total`` uses
+        the same approximation as the ``ids`` case: the number of records
+        actually returned by this call (i.e. ``offset + len(records)``,
+        not the true total match count) rather than ``collection.count()``.
+        Callers driving "next page" purely off whether the current page is
+        full-sized still work correctly; only the displayed grand total is
+        approximate while filtering.
+
+        To determine ``has_more`` while filtering (where ``total`` is only
+        an approximation and can't answer "is there another page"), this
+        method internally requests ``limit + 1`` records from chromadb:
+        ``has_more`` is ``True`` iff that internal fetch returned more than
+        ``limit`` records, and the extra record (if any) is trimmed before
+        returning so callers still see at most ``limit`` records. Without
+        filtering, ``has_more`` is derived directly from ``collection.count()``
+        instead: ``offset + len(records) < total``.
+
+        Any ``ChromaError`` (or ``ValueError``/``TypeError``) raised by
+        chromadb while a ``where``/``where_document`` filter is given is
+        treated as a client error and reraised as ``InvalidFilterError``
+        (422), rather than being distinguished from genuine internal/server
+        failures. This is a deliberate simplification: chromadb does not
+        give this adapter a reliable way to tell "malformed filter" apart
+        from other errors that happen to surface while a filter is active,
+        so all such errors are attributed to the filter. A malformed filter
+        will correctly produce a 422; an unrelated internal error that
+        happens to occur only when filtering is present would incorrectly
+        also surface as a 422 instead of a 5xx, which is the accepted
+        trade-off.
 
         ``embedding_dimension``/``embedding_preview`` (first 8 values) are
         only populated when ``"embeddings"`` is present in ``include``;
@@ -140,6 +179,8 @@ class ChromaAdapter:
 
         Raises:
             CollectionNotFoundError: no collection named ``name`` exists.
+            InvalidFilterError: ``where``/``where_document`` is malformed and
+                rejected by chromadb.
         """
         try:
             collection = self._client.get_collection(name)
@@ -150,7 +191,7 @@ class ChromaAdapter:
             # chromadb raises a ValueError for collection.get(ids=[]); an
             # empty ids list unambiguously matches zero records, so return
             # an empty page without calling into chromadb at all.
-            return [], 0
+            return [], 0, False
 
         if ids is not None:
             # chromadb raises DuplicateIDError if the same id appears more
@@ -164,17 +205,35 @@ class ChromaAdapter:
                     deduped_ids.append(record_id)
             ids = deduped_ids
 
+        is_filtered = where is not None or where_document is not None
         get_include = [item for item in include if item != "ids"]
         get_kwargs: dict[str, Any] = {"include": get_include}
         if ids is not None:
             get_kwargs["ids"] = ids
-        else:
-            get_kwargs["limit"] = limit
+        if where is not None:
+            get_kwargs["where"] = where
+        if where_document is not None:
+            get_kwargs["where_document"] = where_document
+        # Chroma applies limit/offset regardless of whether ids/where/
+        # where_document are also given; only the ids-only (no where/
+        # where_document) case above intentionally omits them, to preserve
+        # existing "ids ignores paging" behavior. When filtering, fetch one
+        # extra record (limit + 1) so has_more can be derived from whether
+        # the extra record came back, without an additional round trip; it
+        # is trimmed off below before records are returned.
+        if ids is None or is_filtered:
+            get_kwargs["limit"] = limit + 1 if is_filtered else limit
             get_kwargs["offset"] = offset
 
         try:
             result = collection.get(**get_kwargs)
         except (ValueError, TypeError, ChromaError) as exc:
+            if where is not None or where_document is not None:
+                # A malformed where/where_document filter is a client error,
+                # not an internal fallback situation; surface it as such
+                # rather than retrying the "uris" fallback below (which
+                # wouldn't help and would just obscure the real cause).
+                raise InvalidFilterError(str(exc)) from exc
             # Defensive fallback: some chromadb versions reject "uris" (or
             # other include values) in collection.get(), raising either a
             # plain ValueError/TypeError or a chromadb-specific error (e.g.
@@ -191,13 +250,45 @@ class ChromaAdapter:
             except Exception:
                 raise exc from None
 
-        total = len(result.get("ids") or []) if ids is not None else collection.count()
+        result_ids = result.get("ids") or []
+        if is_filtered:
+            # Fetched limit + 1 above; more than limit rows coming back
+            # means there is at least one further page.
+            has_more = len(result_ids) > limit
+            if has_more:
+                result_ids = result_ids[:limit]
+            result_count = len(result_ids)
+            # Paging (limit/offset) is applied by chromadb here, so "total"
+            # can only be approximated by how far paging has progressed
+            # (using the trimmed, limit-sized count); see docstring above.
+            total = offset + result_count
+        elif ids is not None:
+            # ids-only: paging isn't applied, so the result count *is* the
+            # total (matching however many of the given ids exist), and all
+            # matches are always returned in this single call.
+            result_count = len(result_ids)
+            total = result_count
+            has_more = False
+        else:
+            result_count = len(result_ids)
+            total = collection.count()
+            has_more = offset + result_count < total
 
-        ids = result.get("ids") or []
+        ids = result_ids
+        # Slice documents/metadatas/uris/embeddings to match the (possibly
+        # trimmed) ids list above so indices stay aligned.
         documents = result.get("documents")
+        if documents is not None:
+            documents = documents[: len(ids)]
         metadatas = result.get("metadatas")
+        if metadatas is not None:
+            metadatas = metadatas[: len(ids)]
         uris = result.get("uris")
+        if uris is not None:
+            uris = uris[: len(ids)]
         embeddings = result.get("embeddings") if "embeddings" in include else None
+        if embeddings is not None:
+            embeddings = embeddings[: len(ids)]
 
         records: list[RecordInfo] = []
         for i, record_id in enumerate(ids):
@@ -223,5 +314,5 @@ class ChromaAdapter:
                 )
             )
 
-        return records, total
+        return records, total, has_more
 

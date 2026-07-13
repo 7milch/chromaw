@@ -29,10 +29,13 @@ export interface RecordInfo {
 export interface RecordsResponse {
   records: RecordInfo[];
   total: number;
+  has_more: boolean;
 }
 
 export interface RecordsGetRequest {
   ids?: string[];
+  where?: Record<string, unknown>;
+  where_document?: Record<string, unknown>;
   limit?: number;
   offset?: number;
   include?: string[];

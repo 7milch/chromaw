@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from chromaw.api import router as api_router
 from chromaw.chroma_adapter import ChromaAdapter
-from chromaw.errors import CollectionNotFoundError
+from chromaw.errors import CollectionNotFoundError, InvalidFilterError
 from chromaw.security import SecurityMiddleware, generate_token
 
 
@@ -77,6 +77,12 @@ def create_app(
         _: Request, exc: CollectionNotFoundError
     ) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(InvalidFilterError)
+    async def _invalid_filter_handler(
+        _: Request, exc: InvalidFilterError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
 
     app.include_router(api_router)
 

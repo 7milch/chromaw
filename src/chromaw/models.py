@@ -46,17 +46,22 @@ class RecordsResponse(BaseModel):
 
     records: list[RecordInfo]
     total: int
+    has_more: bool
 
 
 class RecordsGetRequest(BaseModel):
     """Request body for ``POST /api/collections/{name}/records/get``.
 
-    Minimal ids-based lookup (technical-spec §8.3 later half). ``where`` /
-    ``where_document`` filtering is out of scope here and will be added in
-    M1-4.
+    Supports ids-based lookup as well as ``where`` (metadata equality/operator
+    filter) and ``where_document`` (document content filter, e.g.
+    ``{"$contains": "..."}``) filtering (technical-spec §8.3, §5.5 1-3). All
+    of ``ids``/``where``/``where_document`` may be combined; chromadb applies
+    them as a conjunction (``collection.get`` semantics).
     """
 
     ids: list[str] | None = None
+    where: dict | None = None
+    where_document: dict | None = None
     limit: int = Field(default=50, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
     include: list[str] = Field(

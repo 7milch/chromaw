@@ -9,6 +9,7 @@ from chromaw.errors import (
     ChromaInvalidDirectoryError,
     ChromaPathNotFoundError,
     CollectionNotFoundError,
+    InvalidFilterError,
 )
 
 
@@ -190,7 +191,7 @@ def test_get_records_returns_documents_metadatas_uris(tmp_path: Path) -> None:
     )
 
     adapter = ChromaAdapter.open(tmp_path)
-    records, total = adapter.get_records("foo")
+    records, total, has_more = adapter.get_records("foo")
 
     assert total == 2
     assert len(records) == 2
@@ -210,7 +211,7 @@ def test_get_records_limit_restricts_page_size(tmp_path: Path) -> None:
     collection.add(ids=[str(i) for i in range(10)], documents=[f"d{i}" for i in range(10)])
 
     adapter = ChromaAdapter.open(tmp_path)
-    records, total = adapter.get_records("foo", limit=3, offset=0)
+    records, total, has_more = adapter.get_records("foo", limit=3, offset=0)
 
     assert total == 10
     assert len(records) == 3
@@ -222,7 +223,7 @@ def test_get_records_offset_beyond_count_returns_empty(tmp_path: Path) -> None:
     collection.add(ids=["1", "2"], documents=["a", "b"])
 
     adapter = ChromaAdapter.open(tmp_path)
-    records, total = adapter.get_records("foo", limit=50, offset=100)
+    records, total, has_more = adapter.get_records("foo", limit=50, offset=100)
 
     assert total == 2
     assert records == []
@@ -235,7 +236,7 @@ def test_get_records_include_embeddings_populates_dimension_and_preview(tmp_path
     collection.add(ids=["1"], embeddings=[embedding])
 
     adapter = ChromaAdapter.open(tmp_path)
-    records, _ = adapter.get_records(
+    records, _, _ = adapter.get_records(
         "foo", include=("documents", "metadatas", "uris", "embeddings")
     )
 
@@ -249,7 +250,7 @@ def test_get_records_without_embeddings_include_leaves_dimension_none(tmp_path: 
     collection.add(ids=["1"], embeddings=[[0.1, 0.2, 0.3]])
 
     adapter = ChromaAdapter.open(tmp_path)
-    records, _ = adapter.get_records("foo", include=("documents", "metadatas", "uris"))
+    records, _, _ = adapter.get_records("foo", include=("documents", "metadatas", "uris"))
 
     assert records[0].embedding_dimension is None
     assert records[0].embedding_preview is None
@@ -272,7 +273,7 @@ def test_get_records_ids_filters_to_requested_records(tmp_path: Path) -> None:
     )
 
     adapter = ChromaAdapter.open(tmp_path)
-    records, total = adapter.get_records("foo", ids=["1", "3"])
+    records, total, has_more = adapter.get_records("foo", ids=["1", "3"])
 
     assert total == 2
     assert {r.id for r in records} == {"1", "3"}
@@ -284,7 +285,7 @@ def test_get_records_ids_with_nonexistent_id_returns_empty(tmp_path: Path) -> No
     collection.add(ids=["1", "2"], documents=["a", "b"])
 
     adapter = ChromaAdapter.open(tmp_path)
-    records, total = adapter.get_records("foo", ids=["does-not-exist"])
+    records, total, has_more = adapter.get_records("foo", ids=["does-not-exist"])
 
     assert total == 0
     assert records == []
@@ -299,10 +300,388 @@ def test_get_records_ids_with_embeddings_populates_dimension_and_preview(
     collection.add(ids=["1", "2"], embeddings=[embedding, [9.0] * 10])
 
     adapter = ChromaAdapter.open(tmp_path)
-    records, total = adapter.get_records(
+    records, total, has_more = adapter.get_records(
         "foo", ids=["1"], include=("documents", "metadatas", "uris", "embeddings")
     )
 
     assert total == 1
     assert records[0].embedding_dimension == 10
     assert records[0].embedding_preview == embedding[:8]
+
+
+def test_get_records_where_equality_filters_by_metadata(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1", "2", "3"],
+        documents=["a", "b", "c"],
+        metadatas=[{"source": "x"}, {"source": "y"}, {"source": "x"}],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total, has_more = adapter.get_records("foo", where={"source": "x"})
+
+    assert {r.id for r in records} == {"1", "3"}
+    assert total == 2
+
+
+def test_get_records_where_document_contains_filters_by_document(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1", "2"],
+        documents=["hello world", "goodbye"],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total, has_more = adapter.get_records(
+        "foo", where_document={"$contains": "hello"}
+    )
+
+    assert {r.id for r in records} == {"1"}
+    assert total == 1
+
+
+def test_get_records_where_with_paging(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=[str(i) for i in range(10)],
+        documents=[f"d{i}" for i in range(10)],
+        metadatas=[{"group": "a" if i < 6 else "b"} for i in range(10)],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records_page1, total1, has_more1 = adapter.get_records(
+        "foo", where={"group": "a"}, limit=4, offset=0
+    )
+    records_page2, total2, has_more2 = adapter.get_records(
+        "foo", where={"group": "a"}, limit=4, offset=4
+    )
+
+    assert len(records_page1) == 4
+    assert total1 == 4
+    assert len(records_page2) == 2
+    assert total2 == 6
+
+
+def test_get_records_invalid_where_raises_invalid_filter_error(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], documents=["a"], metadatas=[{"source": "x"}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+
+    with pytest.raises(InvalidFilterError):
+        adapter.get_records("foo", where={"source": {"$badop": "x"}})
+
+
+def test_get_records_where_and_operator_combines_conditions(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1", "2", "3"],
+        documents=["a", "b", "c"],
+        metadatas=[
+            {"source": "x", "group": "a"},
+            {"source": "x", "group": "b"},
+            {"source": "y", "group": "a"},
+        ],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total, has_more = adapter.get_records(
+        "foo",
+        where={"$and": [{"source": "x"}, {"group": "a"}]},
+    )
+
+    assert {r.id for r in records} == {"1"}
+    assert total == 1
+
+
+def test_get_records_where_or_operator_combines_conditions(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1", "2", "3"],
+        documents=["a", "b", "c"],
+        metadatas=[{"source": "x"}, {"source": "y"}, {"source": "z"}],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total, has_more = adapter.get_records(
+        "foo",
+        where={"$or": [{"source": "x"}, {"source": "z"}]},
+    )
+
+    assert {r.id for r in records} == {"1", "3"}
+    assert total == 2
+
+
+def test_get_records_where_in_operator_filters_by_membership(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1", "2", "3"],
+        documents=["a", "b", "c"],
+        metadatas=[{"source": "x"}, {"source": "y"}, {"source": "z"}],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total, has_more = adapter.get_records(
+        "foo",
+        where={"source": {"$in": ["x", "z"]}},
+    )
+
+    assert {r.id for r in records} == {"1", "3"}
+    assert total == 2
+
+
+def test_get_records_where_numeric_value_filters(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1", "2", "3"],
+        documents=["a", "b", "c"],
+        metadatas=[{"count": 1}, {"count": 2}, {"count": 3}],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total, has_more = adapter.get_records("foo", where={"count": {"$gte": 2}})
+
+    assert {r.id for r in records} == {"2", "3"}
+    assert total == 2
+
+
+def test_get_records_where_bool_value_filters(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1", "2"],
+        documents=["a", "b"],
+        metadatas=[{"active": True}, {"active": False}],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total, has_more = adapter.get_records("foo", where={"active": True})
+
+    assert {r.id for r in records} == {"1"}
+    assert total == 1
+
+
+def test_get_records_where_document_contains_empty_string_raises_invalid_filter(
+    tmp_path: Path,
+) -> None:
+    """chromadb rejects an empty-string $contains operand outright rather than
+    treating it as "matches everything"; this must surface as InvalidFilterError,
+    consistent with other malformed where/where_document handling."""
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1", "2"], documents=["hello world", "goodbye"])
+
+    adapter = ChromaAdapter.open(tmp_path)
+
+    with pytest.raises(InvalidFilterError):
+        adapter.get_records("foo", where_document={"$contains": ""})
+
+
+def test_get_records_where_and_where_document_combined(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1", "2", "3"],
+        documents=["hello world", "hello there", "goodbye"],
+        metadatas=[{"source": "x"}, {"source": "y"}, {"source": "x"}],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total, has_more = adapter.get_records(
+        "foo",
+        where={"source": "x"},
+        where_document={"$contains": "hello"},
+    )
+
+    assert {r.id for r in records} == {"1"}
+    assert total == 1
+
+
+def test_get_records_where_and_ids_combined(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1", "2", "3"],
+        documents=["a", "b", "c"],
+        metadatas=[{"source": "x"}, {"source": "x"}, {"source": "y"}],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total, has_more = adapter.get_records(
+        "foo", ids=["1", "2", "3"], where={"source": "x"}
+    )
+
+    assert {r.id for r in records} == {"1", "2"}
+    # ids given alongside where: paging (offset+len) approximation applies,
+    # per get_records docstring, since where is also given.
+    assert total == 2
+
+
+def test_get_records_where_zero_matches_returns_empty(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1", "2"],
+        documents=["a", "b"],
+        metadatas=[{"source": "x"}, {"source": "y"}],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total, has_more = adapter.get_records("foo", where={"source": "does-not-exist"})
+
+    assert records == []
+    assert total == 0
+
+
+def test_get_records_where_offset_beyond_matches_returns_empty_but_total_reflects_offset(
+    tmp_path: Path,
+) -> None:
+    """Documented approximation: while filtering, total == offset + len(records),
+    not the true match count, so an offset beyond the real match count still
+    reports total == offset (with zero records), not the true (smaller) count."""
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1", "2", "3"],
+        documents=["a", "b", "c"],
+        metadatas=[{"source": "x"}, {"source": "x"}, {"source": "y"}],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total, has_more = adapter.get_records(
+        "foo", where={"source": "x"}, limit=10, offset=50
+    )
+
+    assert records == []
+    assert total == 50
+
+
+def test_get_records_has_more_false_without_filter_when_page_not_full(
+    tmp_path: Path,
+) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=[str(i) for i in range(5)], documents=[f"d{i}" for i in range(5)])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total, has_more = adapter.get_records("foo", limit=50, offset=0)
+
+    assert total == 5
+    assert len(records) == 5
+    assert has_more is False
+
+
+def test_get_records_has_more_true_without_filter_when_more_pages_remain(
+    tmp_path: Path,
+) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=[str(i) for i in range(10)], documents=[f"d{i}" for i in range(10)])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total, has_more = adapter.get_records("foo", limit=4, offset=0)
+
+    assert total == 10
+    assert len(records) == 4
+    assert has_more is True
+
+    records_last, total_last, has_more_last = adapter.get_records(
+        "foo", limit=4, offset=8
+    )
+    assert len(records_last) == 2
+    assert has_more_last is False
+
+
+def test_get_records_ids_only_has_more_always_false(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=[str(i) for i in range(10)], documents=[f"d{i}" for i in range(10)]
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records, total, has_more = adapter.get_records(
+        "foo", ids=[str(i) for i in range(10)], limit=1
+    )
+
+    assert total == 10
+    assert len(records) == 10
+    assert has_more is False
+
+
+def test_get_records_where_paging_has_more_transitions_and_reaches_all_matches(
+    tmp_path: Path,
+) -> None:
+    """120 records match a where filter with limit=50: has_more must go
+    True -> True -> False across three pages, and paging through must reach
+    every matching record exactly once (regression for has_more correctness
+    with limit+1 fetch-and-trim, technical-spec paging semantics)."""
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    total_count = 200
+    ids = [str(i) for i in range(total_count)]
+    documents = [f"d{i}" for i in range(total_count)]
+    metadatas = [
+        {"group": "match" if i < 120 else "other"} for i in range(total_count)
+    ]
+    collection.add(ids=ids, documents=documents, metadatas=metadatas)
+
+    adapter = ChromaAdapter.open(tmp_path)
+    limit = 50
+    offset = 0
+    seen_ids: list[str] = []
+    has_more_flags: list[bool] = []
+    for _ in range(10):
+        records, total, has_more = adapter.get_records(
+            "foo", where={"group": "match"}, limit=limit, offset=offset
+        )
+        seen_ids.extend(r.id for r in records)
+        has_more_flags.append(has_more)
+        if not has_more:
+            break
+        offset += limit
+
+    assert has_more_flags == [True, True, False]
+    assert len(seen_ids) == 120
+    assert set(seen_ids) == {str(i) for i in range(120)}
+
+
+def test_get_records_where_paging_has_more_false_at_exact_multiple_boundary(
+    tmp_path: Path,
+) -> None:
+    """100 records match a where filter with limit=50 (an exact multiple):
+    the second (final) page must have has_more False, not a phantom True
+    from the limit+1 fetch-and-trim leaking past the true match count."""
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    total_count = 150
+    ids = [str(i) for i in range(total_count)]
+    documents = [f"d{i}" for i in range(total_count)]
+    metadatas = [
+        {"group": "match" if i < 100 else "other"} for i in range(total_count)
+    ]
+    collection.add(ids=ids, documents=documents, metadatas=metadatas)
+
+    adapter = ChromaAdapter.open(tmp_path)
+    records_page1, total1, has_more1 = adapter.get_records(
+        "foo", where={"group": "match"}, limit=50, offset=0
+    )
+    records_page2, total2, has_more2 = adapter.get_records(
+        "foo", where={"group": "match"}, limit=50, offset=50
+    )
+
+    assert len(records_page1) == 50
+    assert has_more1 is True
+    assert len(records_page2) == 50
+    assert has_more2 is False
+    assert {r.id for r in records_page1} | {r.id for r in records_page2} == {
+        str(i) for i in range(100)
+    }

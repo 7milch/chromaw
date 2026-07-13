@@ -24,3 +24,8 @@ class ChromaInvalidDirectoryError(ChromawError):
 
 class CollectionNotFoundError(ChromawError):
     """Raised when the requested collection does not exist in the ChromaDB directory."""
+
+
+class InvalidFilterError(ChromawError):
+    """Raised when ``where`` / ``where_document`` filter given to ``get_records``
+    is rejected by chromadb (e.g. malformed operator, unknown field syntax)."""

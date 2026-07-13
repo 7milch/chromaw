@@ -5,8 +5,72 @@ import type {
   CollectionsResponse,
   HealthResponse,
   RecordInfo,
+  RecordsGetRequest,
   RecordsResponse,
 } from "./types";
+
+type SearchMode = "id" | "metadata" | "document";
+
+interface ActiveSearch {
+  ids?: string[];
+  where?: Record<string, unknown>;
+  where_document?: Record<string, unknown>;
+}
+
+/**
+ * Parse the search bar's raw input for the given mode into the
+ * ids/where/where_document fields sent to POST .../records/get
+ * (technical-spec §5.5 1-3). Throws with a user-facing message on invalid
+ * input.
+ */
+function parseSearchInput(mode: SearchMode, rawInput: string): ActiveSearch {
+  const input = rawInput.trim();
+  if (!input) {
+    throw new Error("Enter a search value.");
+  }
+
+  if (mode === "id") {
+    const ids = input
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (ids.length === 0) {
+      throw new Error("Enter at least one id.");
+    }
+    return { ids };
+  }
+
+  if (mode === "metadata") {
+    if (input.startsWith("{")) {
+      let where: unknown;
+      try {
+        where = JSON.parse(input);
+      } catch (err) {
+        throw new Error(
+          `Invalid JSON: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+      if (typeof where !== "object" || where === null || Array.isArray(where)) {
+        throw new Error("where JSON must be an object.");
+      }
+      return { where: where as Record<string, unknown> };
+    }
+
+    const eqIndex = input.indexOf("=");
+    if (eqIndex === -1) {
+      throw new Error('Use "key=value" or a raw JSON object starting with "{".');
+    }
+    const key = input.slice(0, eqIndex).trim();
+    const value = input.slice(eqIndex + 1).trim();
+    if (!key) {
+      throw new Error("Missing metadata key before \"=\".");
+    }
+    return { where: { [key]: value } };
+  }
+
+  // document mode
+  return { where_document: { $contains: input } };
+}
 
 function formatMetadataJson(metadata: Record<string, unknown> | null): string {
   return metadata ? JSON.stringify(metadata, null, 2) : "null";
@@ -30,9 +94,15 @@ function App() {
 
   const [records, setRecords] = useState<RecordInfo[] | null>(null);
   const [recordsTotal, setRecordsTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
   const [offset, setOffset] = useState(0);
   const [recordsError, setRecordsError] = useState<string | null>(null);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
+
+  const [searchMode, setSearchMode] = useState<SearchMode>("id");
+  const [searchText, setSearchText] = useState("");
+  const [activeSearch, setActiveSearch] = useState<ActiveSearch | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   const [detailRecord, setDetailRecord] = useState<RecordInfo | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -65,22 +135,72 @@ function App() {
       });
   }, []);
 
-  // Reset paging/selection whenever the selected collection changes.
+  // Reset paging/selection/search whenever the selected collection changes.
   useEffect(() => {
     setOffset(0);
     setRecordsTotal(0);
+    setHasMore(false);
     setSelectedRecordId(null);
     setRecords(null);
     setRecordsError(null);
+    setActiveSearch(null);
+    setSearchText("");
+    setSearchError(null);
   }, [selectedName]);
 
   useEffect(() => {
     if (!selectedName) return;
 
-    // Guard against out-of-order responses: if selectedName/offset change
-    // again before this request resolves, ignore its result instead of
-    // clobbering state set by the newer request.
+    // Guard against out-of-order responses: if selectedName/offset/search
+    // change again before this request resolves, ignore its result instead
+    // of clobbering state set by the newer request.
     let ignore = false;
+
+    if (activeSearch) {
+      // Search mode: POST .../records/get with ids/where/where_document,
+      // keeping limit/offset so paging still works against the filtered
+      // set (task §5.5, spec §8.3).
+      const body: RecordsGetRequest = {
+        ...activeSearch,
+        limit: PAGE_LIMIT,
+        offset,
+        include: ["documents", "metadatas", "uris"],
+      };
+
+      apiFetch(`/api/collections/${encodeURIComponent(selectedName)}/records/get`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            let detail = `request failed: ${res.status}`;
+            if (res.status === 422) {
+              const payload = await res.json().catch(() => null);
+              if (payload && typeof payload.detail === "string") {
+                detail = payload.detail;
+              }
+            }
+            throw new Error(detail);
+          }
+          return res.json() as Promise<RecordsResponse>;
+        })
+        .then((data) => {
+          if (ignore) return;
+          setRecords(data.records);
+          setRecordsTotal(data.total);
+          setHasMore(data.has_more);
+          setSearchError(null);
+        })
+        .catch((err: unknown) => {
+          if (ignore) return;
+          setSearchError(err instanceof Error ? err.message : String(err));
+        });
+
+      return () => {
+        ignore = true;
+      };
+    }
 
     const params = new URLSearchParams({
       include: "documents,metadatas,uris",
@@ -99,6 +219,7 @@ function App() {
         if (ignore) return;
         setRecords(data.records);
         setRecordsTotal(data.total);
+        setHasMore(data.has_more);
       })
       .catch((err: unknown) => {
         if (ignore) return;
@@ -108,7 +229,7 @@ function App() {
     return () => {
       ignore = true;
     };
-  }, [selectedName, offset]);
+  }, [selectedName, offset, activeSearch]);
 
   // Fetch full detail (including embeddings) for the selected record.
   // Same out-of-order-response guard as the records list fetch above.
@@ -158,10 +279,32 @@ function App() {
 
   const selected = collections?.find((c) => c.name === selectedName) ?? null;
 
+  function executeSearch() {
+    try {
+      const parsed = parseSearchInput(searchMode, searchText);
+      setSearchError(null);
+      setOffset(0);
+      setActiveSearch(parsed);
+    } catch (err) {
+      setSearchError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function clearSearch() {
+    setSearchText("");
+    setSearchError(null);
+    setActiveSearch(null);
+    setOffset(0);
+  }
+
+  // ids-based search returns every match in one page (chromaw ignores
+  // limit/offset for it server-side), so paging controls are meaningless
+  // and disabled in that mode.
+  const isIdSearch = activeSearch?.ids !== undefined;
   const rangeStart = recordsTotal === 0 ? 0 : offset + 1;
   const rangeEnd = records ? offset + records.length : 0;
-  const canPrev = offset > 0;
-  const canNext = offset + PAGE_LIMIT < recordsTotal;
+  const canPrev = !isIdSearch && offset > 0;
+  const canNext = !isIdSearch && hasMore;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
@@ -258,6 +401,53 @@ function App() {
                 )}
               </div>
 
+              <div className="flex flex-col gap-1">
+                <div className="flex items-center gap-2">
+                  <select
+                    value={searchMode}
+                    onChange={(e) => setSearchMode(e.target.value as SearchMode)}
+                    className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-200"
+                  >
+                    <option value="id">ID</option>
+                    <option value="metadata">Metadata</option>
+                    <option value="document">Document</option>
+                  </select>
+                  <input
+                    type="text"
+                    value={searchText}
+                    onChange={(e) => setSearchText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") executeSearch();
+                    }}
+                    placeholder={
+                      searchMode === "id"
+                        ? "id1, id2, ..."
+                        : searchMode === "metadata"
+                          ? 'key=value or {"key": "value"}'
+                          : "text the document should contain"
+                    }
+                    className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-200 placeholder:text-slate-600"
+                  />
+                  <button
+                    type="button"
+                    onClick={executeSearch}
+                    className="rounded border border-slate-700 px-2 py-1 text-sm hover:bg-slate-800"
+                  >
+                    Search
+                  </button>
+                  {activeSearch && (
+                    <button
+                      type="button"
+                      onClick={clearSearch}
+                      className="rounded border border-slate-700 px-2 py-1 text-sm hover:bg-slate-800"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+                {searchError && <p className="text-sm text-red-400">{searchError}</p>}
+              </div>
+
               {recordsError && (
                 <p className="text-sm text-red-400">Failed to load records: {recordsError}</p>
               )}
@@ -307,7 +497,19 @@ function App() {
 
                   <div className="flex items-center justify-between text-xs text-slate-400">
                     <span>
-                      {rangeStart}–{rangeEnd} / {recordsTotal}
+                      {isIdSearch ? (
+                        <>
+                          {records?.length ?? 0} match{records?.length === 1 ? "" : "es"}
+                        </>
+                      ) : activeSearch ? (
+                        <>
+                          {rangeStart}–{rangeEnd} (total unknown while filtering)
+                        </>
+                      ) : (
+                        <>
+                          {rangeStart}–{rangeEnd} / {recordsTotal}
+                        </>
+                      )}
                     </span>
                     <div className="flex gap-2">
                       <button

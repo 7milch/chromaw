@@ -39,3 +39,11 @@ class BackupFailedError(ChromawError):
     """Raised when the pre-first-write backup (technical-spec §9.1) could not
     be created. Callers must treat this as fail-closed: the write the
     backup was meant to protect must not proceed."""
+
+
+class AuditWriteFailedError(ChromawError):
+    """Raised when an audit log entry (technical-spec §9.2) could not be
+    appended to ``.chromaw/audit.jsonl``. chromaw treats audit logging as
+    fail-closed: if a write operation cannot be recorded, the caller must
+    not treat the operation as successfully completed and must surface an
+    error rather than silently skip the audit trail."""

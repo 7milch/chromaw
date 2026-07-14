@@ -122,6 +122,14 @@ def patch_record(
     call, and raises ``BackupFailedError`` (mapped to a 500 by
     ``create_app``) if the backup couldn't be made -- fail-closed, so
     ``adapter.update_record`` below is never reached in that case.
+
+    After a successful mutation, the change is appended to the audit log
+    (technical-spec §9.2, roadmap M2-6) via ``request.app.state.audit_logger``
+    -- only fields actually present in the request body are recorded, each
+    as a before/after pair. ``AuditWriteFailedError`` propagates (mapped to
+    a 500 by ``create_app``) rather than being swallowed: per the audit
+    module's fail-closed contract, a write whose audit entry couldn't be
+    persisted must not be reported to the client as having succeeded.
     """
 
     backup_manager = request.app.state.backup_manager
@@ -129,13 +137,24 @@ def patch_record(
         backup_manager.ensure_backup()
 
     adapter = request.app.state.adapter
+
+    before_records, _, _ = adapter.get_records(
+        name,
+        ids=[record_id],
+        include=("documents", "metadatas", "uris"),
+    )
+    if not before_records:
+        raise RecordNotFoundError(f"record not found: {record_id!r} in collection {name!r}")
+    before = before_records[0]
+
+    mark_stale = body.document is not None
     adapter.update_record(
         name,
         record_id,
         metadata=body.metadata,
         uri=body.uri,
         document=body.document,
-        mark_stale=body.document is not None,
+        mark_stale=mark_stale,
     )
 
     records, _, _ = adapter.get_records(
@@ -145,7 +164,25 @@ def patch_record(
     )
     if not records:
         raise RecordNotFoundError(f"record not found: {record_id!r} in collection {name!r}")
-    return records[0]
+    after = records[0]
+
+    audit_logger = request.app.state.audit_logger
+    if audit_logger is not None:
+        changes: dict[str, dict[str, object]] = {}
+        if body.metadata is not None:
+            changes["metadata"] = {"before": before.metadata, "after": after.metadata}
+        if body.uri is not None:
+            changes["uri"] = {"before": before.uri, "after": after.uri}
+        if body.document is not None:
+            changes["document"] = {"before": before.document, "after": after.document}
+        audit_logger.log_update(
+            collection=name,
+            record_id=record_id,
+            changes=changes,
+            embedding_stale=mark_stale,
+        )
+
+    return after
 
 
 @router.post("/diff", response_model=DiffResponse)

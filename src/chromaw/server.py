@@ -9,9 +9,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from chromaw.api import router as api_router
+from chromaw.audit import AuditLogger
 from chromaw.backup import BackupManager
 from chromaw.chroma_adapter import ChromaAdapter
 from chromaw.errors import (
+    AuditWriteFailedError,
     BackupFailedError,
     CollectionNotFoundError,
     InvalidFilterError,
@@ -80,6 +82,12 @@ def create_app(
     # created in write mode. Write endpoints look this up via
     # ``request.app.state.backup_manager`` before mutating anything.
     app.state.backup_manager = BackupManager(adapter.path) if write else None
+    # Audit log (technical-spec §9.2, roadmap M2-6): same read-only/write
+    # gating as the backup manager above -- only reachable write endpoints
+    # ever need to append entries, so the logger is only created in write
+    # mode. Write endpoints look this up via
+    # ``request.app.state.audit_logger`` after a mutation succeeds.
+    app.state.audit_logger = AuditLogger(adapter.path) if write else None
 
     app.add_middleware(SecurityMiddleware, token=resolved_token, host=host, port=port)
 
@@ -106,6 +114,15 @@ def create_app(
         # Fail-closed (technical-spec §9.1): the write that triggered the
         # backup must not have proceeded; surface this as a server error
         # rather than a 4xx since it's not something the client did wrong.
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+    @app.exception_handler(AuditWriteFailedError)
+    async def _audit_write_failed_handler(
+        _: Request, exc: AuditWriteFailedError
+    ) -> JSONResponse:
+        # Fail-closed (technical-spec §9.2): the mutation itself already
+        # happened by the time this is raised, but the client must not be
+        # told the operation succeeded if it couldn't be recorded.
         return JSONResponse(status_code=500, content={"detail": str(exc)})
 
     app.include_router(api_router)

@@ -115,7 +115,18 @@ def patch_record(
     ``RecordUpdateRequest`` validation), so they are always forwarded with
     ``mark_stale=True``: the embedding is left untouched and the record's
     metadata is flagged ``chromaw_embedding_status: "stale"``.
+
+    Before the actual mutation, this is the write-endpoint hook for the
+    pre-first-write backup (technical-spec §9.1, roadmap M2-5):
+    ``backup_manager.ensure_backup()`` is a no-op after its first successful
+    call, and raises ``BackupFailedError`` (mapped to a 500 by
+    ``create_app``) if the backup couldn't be made -- fail-closed, so
+    ``adapter.update_record`` below is never reached in that case.
     """
+
+    backup_manager = request.app.state.backup_manager
+    if backup_manager is not None:
+        backup_manager.ensure_backup()
 
     adapter = request.app.state.adapter
     adapter.update_record(

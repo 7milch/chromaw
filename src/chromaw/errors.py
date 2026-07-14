@@ -33,3 +33,9 @@ class InvalidFilterError(ChromawError):
 
 class RecordNotFoundError(ChromawError):
     """Raised when the requested record id does not exist in the collection."""
+
+
+class BackupFailedError(ChromawError):
+    """Raised when the pre-first-write backup (technical-spec §9.1) could not
+    be created. Callers must treat this as fail-closed: the write the
+    backup was meant to protect must not proceed."""

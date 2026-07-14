@@ -9,8 +9,14 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from chromaw.api import router as api_router
+from chromaw.backup import BackupManager
 from chromaw.chroma_adapter import ChromaAdapter
-from chromaw.errors import CollectionNotFoundError, InvalidFilterError, RecordNotFoundError
+from chromaw.errors import (
+    BackupFailedError,
+    CollectionNotFoundError,
+    InvalidFilterError,
+    RecordNotFoundError,
+)
 from chromaw.security import SecurityMiddleware, generate_token
 
 
@@ -69,6 +75,11 @@ def create_app(
     app.state.mode = "write" if write else "read-only"
     app.state.path = adapter.path
     app.state.token = resolved_token
+    # Pre-first-write backup (technical-spec §9.1, roadmap M2-5): only
+    # relevant when write endpoints are reachable at all, so it's only
+    # created in write mode. Write endpoints look this up via
+    # ``request.app.state.backup_manager`` before mutating anything.
+    app.state.backup_manager = BackupManager(adapter.path) if write else None
 
     app.add_middleware(SecurityMiddleware, token=resolved_token, host=host, port=port)
 
@@ -89,6 +100,13 @@ def create_app(
         _: Request, exc: RecordNotFoundError
     ) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(BackupFailedError)
+    async def _backup_failed_handler(_: Request, exc: BackupFailedError) -> JSONResponse:
+        # Fail-closed (technical-spec §9.1): the write that triggered the
+        # backup must not have proceeded; surface this as a server error
+        # rather than a 4xx since it's not something the client did wrong.
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
 
     app.include_router(api_router)
 

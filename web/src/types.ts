@@ -44,4 +44,6 @@ export interface RecordsGetRequest {
 export interface RecordUpdateRequest {
   metadata?: Record<string, unknown> | null;
   uri?: string | null;
+  document?: string | null;
+  embedding_mode?: "keep" | null;
 }

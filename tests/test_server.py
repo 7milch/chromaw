@@ -1357,3 +1357,140 @@ def test_patch_record_persists_across_app_instances(tmp_path: Path, make_app, ma
     updated = next(r for r in get_response.json()["records"] if r["id"] == "0")
     assert updated["metadata"] == {"idx": 0, "updated": True}
     assert updated["uri"] == "file:///new"
+
+
+def test_patch_record_document_reflected_and_marks_stale(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """document update (technical-spec §3.3): document is reflected in a
+    subsequent GET, metadata gets chromaw_embedding_status=stale, and the
+    embedding itself is left unchanged."""
+    _add_records(tmp_path, "foo", 1, with_embeddings=True)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    before = client.post(
+        "/api/collections/foo/records/get",
+        json={"ids": ["0"], "include": ["embeddings"]},
+    ).json()["records"][0]
+
+    response = client.patch(
+        "/api/collections/foo/records/0",
+        json={"document": "new document text", "embedding_mode": "keep"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["document"] == "new document text"
+    assert body["metadata"]["chromaw_embedding_status"] == "stale"
+    # pre-existing metadata (idx) must be preserved, not clobbered.
+    assert body["metadata"]["idx"] == 0
+
+    get_response = client.get("/api/collections/foo/records?limit=10")
+    updated = next(r for r in get_response.json()["records"] if r["id"] == "0")
+    assert updated["document"] == "new document text"
+    assert updated["metadata"]["chromaw_embedding_status"] == "stale"
+
+    after = client.post(
+        "/api/collections/foo/records/get",
+        json={"ids": ["0"], "include": ["embeddings"]},
+    ).json()["records"][0]
+    assert after["embedding_preview"] == before["embedding_preview"]
+    assert after["embedding_dimension"] == before["embedding_dimension"]
+
+
+def test_patch_record_document_without_embedding_mode_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/0", json={"document": "new text"}
+    )
+
+    assert response.status_code == 422
+
+
+def test_patch_record_document_and_metadata_together(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """document + user-supplied metadata in the same PATCH: both must apply,
+    and the stale flag must be merged into the user's metadata rather than
+    overwriting it."""
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/0",
+        json={
+            "document": "new text",
+            "embedding_mode": "keep",
+            "metadata": {"tag": "reviewed"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["document"] == "new text"
+    assert body["metadata"]["tag"] == "reviewed"
+    assert body["metadata"]["chromaw_embedding_status"] == "stale"
+
+
+def test_patch_record_document_read_only_returns_403(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=False)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/0",
+        json={"document": "new text", "embedding_mode": "keep"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_patch_record_document_without_token_returns_401(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app, token=None)
+
+    response = client.patch(
+        "/api/collections/foo/records/0",
+        json={"document": "new text", "embedding_mode": "keep"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_patch_record_empty_document_is_valid(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """An empty string document is a legitimate value (distinct from
+    omitting document, which is None/unset) and must be accepted, not
+    treated as a no-op."""
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/0",
+        json={"document": "", "embedding_mode": "keep"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["document"] == ""
+    assert body["metadata"]["chromaw_embedding_status"] == "stale"

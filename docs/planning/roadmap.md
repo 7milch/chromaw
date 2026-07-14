@@ -35,7 +35,7 @@
 - [x] M2-2: metadata 編集フロー（validation → diff → 確認 → update） (Issue #15)
 - [x] M2-3: document 編集（keep embedding 警告 + stale 記録） (Issue #16)
 - [x] M2-4: `POST /api/diff` と unified diff 表示 (Issue #17)
-- [ ] M2-5: 初回 write 前バックアップ
+- [x] M2-5: 初回 write 前バックアップ (Issue #18)
 - [ ] M2-6: audit log（`.chromaw/audit.jsonl`）
 - [ ] M2-7: 削除・rename の対象名入力確認フロー
 - [ ] M2-8: `.chromaw/lock` による多重起動ガード

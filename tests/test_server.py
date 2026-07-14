@@ -1494,3 +1494,171 @@ def test_patch_record_empty_document_is_valid(
     body = response.json()
     assert body["document"] == ""
     assert body["metadata"]["chromaw_embedding_status"] == "stale"
+
+
+def test_post_diff_basic(tmp_path: Path, make_app, make_client) -> None:
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/diff", json={"before": "hello\n", "after": "world\n"}
+    )
+
+    assert response.status_code == 200
+    diff = response.json()["diff"]
+    assert "-hello" in diff
+    assert "+world" in diff
+    assert "--- before" in diff
+    assert "+++ after" in diff
+
+
+def test_post_diff_no_changes_returns_empty_diff(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/diff", json={"before": "same text", "after": "same text"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["diff"] == ""
+
+
+def test_post_diff_without_token_returns_401(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    app = make_app(tmp_path)
+    client = make_client(app, token=None)
+
+    response = client.post("/api/diff", json={"before": "a", "after": "b"})
+
+    assert response.status_code == 401
+
+
+def test_post_diff_read_only_mode_is_allowed(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """POST /api/diff has no side effects, so it must work even without
+    --write (unlike PATCH, it does not depend on require_write_mode)."""
+    app = make_app(tmp_path, write=False)
+    client = make_client(app)
+
+    response = client.post("/api/diff", json={"before": "a", "after": "b"})
+
+    assert response.status_code == 200
+
+
+def test_post_diff_multiline_with_custom_labels(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    before = "line1\nline2\nline3\n"
+    after = "line1\nline2 changed\nline3\nline4\n"
+
+    response = client.post(
+        "/api/diff",
+        json={
+            "before": before,
+            "after": after,
+            "before_label": "old.txt",
+            "after_label": "new.txt",
+        },
+    )
+
+    assert response.status_code == 200
+    diff = response.json()["diff"]
+    assert "--- old.txt" in diff
+    assert "+++ new.txt" in diff
+    assert "-line2" in diff
+    assert "+line2 changed" in diff
+    assert "+line4" in diff
+
+
+def test_post_diff_no_trailing_newline(tmp_path: Path, make_app, make_client) -> None:
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/diff", json={"before": "hello", "after": "world"}
+    )
+
+    assert response.status_code == 200
+    diff = response.json()["diff"]
+    assert "-hello" in diff
+    assert "+world" in diff
+
+
+def test_post_diff_crlf_line_endings(tmp_path: Path, make_app, make_client) -> None:
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/diff",
+        json={"before": "line1\r\nline2\r\n", "after": "line1\r\nline2 changed\r\n"},
+    )
+
+    assert response.status_code == 200
+    diff = response.json()["diff"]
+    assert "line2" in diff
+    assert "changed" in diff
+
+
+def test_post_diff_unicode(tmp_path: Path, make_app, make_client) -> None:
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/diff",
+        json={"before": "こんにちは 🎉\n", "after": "さようなら 🚀\n"},
+    )
+
+    assert response.status_code == 200
+    diff = response.json()["diff"]
+    assert "こんにちは" in diff
+    assert "さようなら" in diff
+    assert "🎉" in diff
+    assert "🚀" in diff
+
+
+def test_post_diff_large_input(tmp_path: Path, make_app, make_client) -> None:
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    before_lines = [f"line {i}\n" for i in range(5000)]
+    after_lines = list(before_lines)
+    after_lines[2500] = "line 2500 CHANGED\n"
+
+    response = client.post(
+        "/api/diff",
+        json={"before": "".join(before_lines), "after": "".join(after_lines)},
+    )
+
+    assert response.status_code == 200
+    diff = response.json()["diff"]
+    assert "-line 2500" in diff
+    assert "+line 2500 CHANGED" in diff
+
+
+def test_post_diff_empty_strings(tmp_path: Path, make_app, make_client) -> None:
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post("/api/diff", json={"before": "", "after": ""})
+
+    assert response.status_code == 200
+    assert response.json()["diff"] == ""
+
+
+def test_post_diff_missing_required_field_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post("/api/diff", json={"before": "a"})
+
+    assert response.status_code == 422

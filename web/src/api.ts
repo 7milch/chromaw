@@ -20,3 +20,36 @@ export function apiFetch(input: string, init: RequestInit = {}): Promise<Respons
   // in-flight requests by supplying one.
   return fetch(input, { ...init, headers });
 }
+
+/**
+ * Fetch a unified diff from ``POST /api/diff`` (M2-4, technical-spec §8).
+ *
+ * Returns ``null`` on any failure (network error, non-2xx, malformed body)
+ * so callers can fall back to their existing non-diff confirmation UI
+ * instead of blocking the edit flow on this being available.
+ */
+export async function fetchDiff(
+  before: string,
+  after: string,
+  beforeLabel = "before",
+  afterLabel = "after"
+): Promise<string | null> {
+  try {
+    const res = await apiFetch("/api/diff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        before,
+        after,
+        before_label: beforeLabel,
+        after_label: afterLabel,
+      }),
+    });
+    if (!res.ok) return null;
+    const payload = await res.json().catch(() => null);
+    if (!payload || typeof payload.diff !== "string") return null;
+    return payload.diff;
+  } catch {
+    return null;
+  }
+}

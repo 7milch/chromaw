@@ -137,3 +137,25 @@ class RecordUpdateRequest(BaseModel):
                 f"or bool (got {type(value).__name__})"
             )
         return self
+
+
+class DiffRequest(BaseModel):
+    """Request body for ``POST /api/diff`` (technical-spec §8, M2-4).
+
+    Generic unified-diff endpoint: the frontend supplies arbitrary
+    before/after text (e.g. raw ``document`` text, or ``metadata`` rendered
+    via ``JSON.stringify(obj, null, 2)``) plus optional labels, and gets back
+    a unified diff string. This has no side effects, so unlike the PATCH
+    endpoint it does not require ``require_write_mode``.
+    """
+
+    before: str
+    after: str
+    before_label: str = "before"
+    after_label: str = "after"
+
+
+class DiffResponse(BaseModel):
+    """Response body for ``POST /api/diff``."""
+
+    diff: str

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import difflib
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from chromaw import __version__
 from chromaw.errors import RecordNotFoundError
 from chromaw.models import (
     CollectionsResponse,
+    DiffRequest,
+    DiffResponse,
     HealthResponse,
     RecordInfo,
     RecordsGetRequest,
@@ -131,6 +135,26 @@ def patch_record(
     if not records:
         raise RecordNotFoundError(f"record not found: {record_id!r} in collection {name!r}")
     return records[0]
+
+
+@router.post("/diff", response_model=DiffResponse)
+def post_diff(body: DiffRequest) -> DiffResponse:
+    """Generate a unified diff between two arbitrary texts (M2-4).
+
+    Used by the frontend's edit-confirmation screens to preview ``document``
+    and ``metadata`` (JSON-serialized) changes before a PATCH is sent. Has no
+    side effects, so it is available in read-only mode (no
+    ``require_write_mode`` dependency) and only needs the bearer-token
+    auth already applied to all ``/api`` routes.
+    """
+
+    diff_lines = difflib.unified_diff(
+        body.before.splitlines(keepends=True),
+        body.after.splitlines(keepends=True),
+        fromfile=body.before_label,
+        tofile=body.after_label,
+    )
+    return DiffResponse(diff="".join(diff_lines))
 
 
 @router.post("/collections/{name}/records/get", response_model=RecordsResponse)

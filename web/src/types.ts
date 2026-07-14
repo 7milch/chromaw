@@ -47,3 +47,14 @@ export interface RecordUpdateRequest {
   document?: string | null;
   embedding_mode?: "keep" | null;
 }
+
+export interface DiffRequest {
+  before: string;
+  after: string;
+  before_label?: string;
+  after_label?: string;
+}
+
+export interface DiffResponse {
+  diff: string;
+}

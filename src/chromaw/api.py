@@ -104,13 +104,24 @@ def patch_record(
     request: Request,
     body: RecordUpdateRequest,
 ) -> RecordInfo:
-    """Update ``metadata`` and/or ``uri`` for a single record
-    (technical-spec §5.4, §8.3). M2-2 scope only; ``document`` and
-    ``embedding_mode`` are handled in M2-3.
+    """Update ``metadata``, ``uri``, and/or ``document`` for a single record
+    (technical-spec §3.3, §5.4, §8.3).
+
+    ``document`` updates always carry ``embedding_mode="keep"`` (enforced by
+    ``RecordUpdateRequest`` validation), so they are always forwarded with
+    ``mark_stale=True``: the embedding is left untouched and the record's
+    metadata is flagged ``chromaw_embedding_status: "stale"``.
     """
 
     adapter = request.app.state.adapter
-    adapter.update_record(name, record_id, metadata=body.metadata, uri=body.uri)
+    adapter.update_record(
+        name,
+        record_id,
+        metadata=body.metadata,
+        uri=body.uri,
+        document=body.document,
+        mark_stale=body.document is not None,
+    )
 
     records, _, _ = adapter.get_records(
         name,

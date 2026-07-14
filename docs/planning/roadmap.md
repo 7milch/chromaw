@@ -33,7 +33,7 @@
 
 - [x] M2-1: `--write` フラグとモード表示（read-only / write） (Issue #14)
 - [x] M2-2: metadata 編集フロー（validation → diff → 確認 → update） (Issue #15)
-- [ ] M2-3: document 編集（keep embedding 警告 + stale 記録）
+- [x] M2-3: document 編集（keep embedding 警告 + stale 記録） (Issue #16)
 - [ ] M2-4: `POST /api/diff` と unified diff 表示
 - [ ] M2-5: 初回 write 前バックアップ
 - [ ] M2-6: audit log（`.chromaw/audit.jsonl`）

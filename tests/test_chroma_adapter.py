@@ -814,3 +814,66 @@ def test_update_record_persists_across_adapter_instances(tmp_path: Path) -> None
     records, _, _ = adapter2.get_records("foo", ids=["1"])
     assert records[0].metadata == {"a": 2, "b": "new"}
     assert records[0].uri == "file:///new"
+
+
+def test_update_record_document_updates_document_and_leaves_embedding_untouched(
+    tmp_path: Path,
+) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1"], embeddings=[[0.1, 0.2]], documents=["old text"], metadatas=[{"a": 1}]
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    adapter.update_record("foo", "1", document="new text")
+
+    records, _, _ = adapter.get_records("foo", ids=["1"], include=("documents", "embeddings"))
+    assert records[0].document == "new text"
+    assert records[0].embedding_preview == pytest.approx([0.1, 0.2])
+
+
+def test_update_record_mark_stale_without_metadata_sets_status_only(
+    tmp_path: Path,
+) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], metadatas=[{"a": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    adapter.update_record("foo", "1", document="new text", mark_stale=True)
+
+    records, _, _ = adapter.get_records("foo", ids=["1"])
+    assert records[0].metadata == {"a": 1, "chromaw_embedding_status": "stale"}
+
+
+def test_update_record_mark_stale_merges_into_given_metadata(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], metadatas=[{"a": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    adapter.update_record(
+        "foo", "1", document="new text", metadata={"tag": "reviewed"}, mark_stale=True
+    )
+
+    records, _, _ = adapter.get_records("foo", ids=["1"])
+    assert records[0].metadata == {
+        "a": 1,
+        "tag": "reviewed",
+        "chromaw_embedding_status": "stale",
+    }
+
+
+def test_update_record_no_mark_stale_leaves_metadata_untouched(tmp_path: Path) -> None:
+    """document update without mark_stale (e.g. hypothetical future modes)
+    must not add the stale flag."""
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], metadatas=[{"a": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    adapter.update_record("foo", "1", document="new text")
+
+    records, _, _ = adapter.get_records("foo", ids=["1"])
+    assert records[0].metadata == {"a": 1}

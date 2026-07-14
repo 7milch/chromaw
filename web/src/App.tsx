@@ -3,6 +3,7 @@ import { apiFetch } from "./api";
 import { useAppConfig } from "./AppConfigContext";
 import { exportCollectionRecords, type ExportFilters } from "./export";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
+import DocumentEditor from "./DocumentEditor";
 import MetadataEditor from "./MetadataEditor";
 import ShortcutsHelpModal from "./ShortcutsHelpModal";
 import type {
@@ -697,14 +698,22 @@ function App() {
                 </code>
               </div>
 
-              <div>
-                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  document
-                </h3>
-                <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-900 p-2 font-mono text-xs text-slate-300">
-                  {detailRecord.document ?? "-"}
-                </pre>
-              </div>
+              {isWriteMode ? (
+                <DocumentEditor
+                  collectionName={selectedName!}
+                  record={detailRecord}
+                  onSaved={() => setRefreshTick((t) => t + 1)}
+                />
+              ) : (
+                <div>
+                  <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    document
+                  </h3>
+                  <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-900 p-2 font-mono text-xs text-slate-300">
+                    {detailRecord.document ?? "-"}
+                  </pre>
+                </div>
+              )}
 
               {isWriteMode ? (
                 <MetadataEditor

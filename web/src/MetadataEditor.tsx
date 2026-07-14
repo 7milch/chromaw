@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { apiFetch } from "./api";
+import { apiFetch, fetchDiff } from "./api";
+import UnifiedDiffView from "./UnifiedDiffView";
 import type { RecordInfo, RecordUpdateRequest } from "./types";
 
 interface MetadataEditorProps {
@@ -90,6 +91,11 @@ export default function MetadataEditor({
   const [pendingUri, setPendingUri] = useState<string | null>(null);
   const [metadataChanged, setMetadataChanged] = useState(false);
   const [uriChanged, setUriChanged] = useState(false);
+  // undefined = not fetched yet / in flight, null = fetch failed (fall back
+  // to the key-based diff list below), string = unified diff to render.
+  const [metadataDiff, setMetadataDiff] = useState<string | null | undefined>(
+    undefined
+  );
 
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -110,7 +116,7 @@ export default function MetadataEditor({
     setSaveError(null);
   }
 
-  function reviewChanges() {
+  async function reviewChanges() {
     setValidationError(null);
 
     let parsedMetadata: unknown;
@@ -145,7 +151,18 @@ export default function MetadataEditor({
     setPendingUri(newUri);
     setMetadataChanged(metaChanged);
     setUriChanged(uriChangedNow);
+    setMetadataDiff(undefined);
     setConfirming(true);
+
+    if (metaChanged) {
+      const result = await fetchDiff(
+        JSON.stringify(record.metadata ?? {}, null, 2),
+        JSON.stringify(flatMetadata, null, 2),
+        "before",
+        "after"
+      );
+      setMetadataDiff(result);
+    }
   }
 
   async function confirmSave() {
@@ -272,30 +289,40 @@ export default function MetadataEditor({
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
             Confirm changes
           </p>
-          <ul className="space-y-0.5 font-mono text-xs">
-            {diffEntries.length === 0 && !uriChanged && (
-              <li className="text-slate-500">(no metadata changes)</li>
-            )}
-            {diffEntries.map((entry) => (
-              <li key={entry.key} className={diffColorClass(entry.kind)}>
-                {entry.kind === "added" &&
-                  `+ ${entry.key}: ${JSON.stringify(entry.after)}`}
-                {entry.kind === "removed" &&
-                  `- ${entry.key}: ${JSON.stringify(entry.before)}`}
-                {entry.kind === "changed" &&
-                  `~ ${entry.key}: ${JSON.stringify(entry.before)} → ${JSON.stringify(
-                    entry.after
-                  )}`}
-              </li>
+          {metadataChanged &&
+            (metadataDiff === undefined ? (
+              <p className="text-xs text-slate-500">Loading diff…</p>
+            ) : metadataDiff ? (
+              <UnifiedDiffView diff={metadataDiff} />
+            ) : (
+              <ul className="space-y-0.5 font-mono text-xs">
+                {diffEntries.length === 0 && (
+                  <li className="text-slate-500">(no metadata changes)</li>
+                )}
+                {diffEntries.map((entry) => (
+                  <li key={entry.key} className={diffColorClass(entry.kind)}>
+                    {entry.kind === "added" &&
+                      `+ ${entry.key}: ${JSON.stringify(entry.after)}`}
+                    {entry.kind === "removed" &&
+                      `- ${entry.key}: ${JSON.stringify(entry.before)}`}
+                    {entry.kind === "changed" &&
+                      `~ ${entry.key}: ${JSON.stringify(
+                        entry.before
+                      )} → ${JSON.stringify(entry.after)}`}
+                  </li>
+                ))}
+              </ul>
             ))}
-            {uriChanged && (
-              <li className="text-amber-400">
-                {`~ uri: ${JSON.stringify(record.uri ?? null)} → ${JSON.stringify(
-                  pendingUri
-                )}`}
-              </li>
-            )}
-          </ul>
+          {!metadataChanged && !uriChanged && (
+            <p className="font-mono text-xs text-slate-500">(no metadata changes)</p>
+          )}
+          {uriChanged && (
+            <p className="font-mono text-xs text-amber-400">
+              {`~ uri: ${JSON.stringify(record.uri ?? null)} → ${JSON.stringify(
+                pendingUri
+              )}`}
+            </p>
+          )}
           {hasRemovedKeys && (
             <p className="rounded bg-amber-900/60 px-2 py-1 text-xs text-amber-300">
               chromadb's update merges metadata rather than replacing it, so key

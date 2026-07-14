@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { apiFetch } from "./api";
+import { apiFetch, fetchDiff } from "./api";
+import UnifiedDiffView from "./UnifiedDiffView";
 import type { RecordInfo, RecordUpdateRequest } from "./types";
 
 interface DocumentEditorProps {
@@ -27,6 +28,9 @@ export default function DocumentEditor({
 
   const [confirming, setConfirming] = useState(false);
   const [pendingDocument, setPendingDocument] = useState<string | null>(null);
+  // undefined = not fetched yet / in flight, null = fetch failed (fall back
+  // to the char-count summary above), string = unified diff to render.
+  const [diff, setDiff] = useState<string | null | undefined>(undefined);
 
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -46,7 +50,7 @@ export default function DocumentEditor({
     setSaveError(null);
   }
 
-  function reviewChanges() {
+  async function reviewChanges() {
     setValidationError(null);
 
     const before = record.document ?? "";
@@ -56,7 +60,11 @@ export default function DocumentEditor({
     }
 
     setPendingDocument(documentText);
+    setDiff(undefined);
     setConfirming(true);
+
+    const result = await fetchDiff(before, documentText, "before", "after");
+    setDiff(result);
   }
 
   async function confirmSave() {
@@ -175,6 +183,13 @@ export default function DocumentEditor({
             {beforeLength} chars → {afterLength} chars (
             {lengthDelta >= 0 ? `+${lengthDelta}` : lengthDelta})
           </p>
+          {diff === undefined && (
+            <p className="text-xs text-slate-500">Loading diff…</p>
+          )}
+          {diff === "" && <p className="text-xs text-slate-500">(no changes)</p>}
+          {diff !== undefined && diff !== null && diff !== "" && (
+            <UnifiedDiffView diff={diff} />
+          )}
           {saveError && <p className="text-xs text-red-400">{saveError}</p>}
           <div className="flex gap-2">
             <button

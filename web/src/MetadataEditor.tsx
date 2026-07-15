@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { forwardRef, useImperativeHandle, useState } from "react";
+import type { ForwardedRef } from "react";
 import { apiFetch, fetchDiff } from "./api";
 import UnifiedDiffView from "./UnifiedDiffView";
 import type { RecordInfo, RecordUpdateRequest } from "./types";
@@ -7,6 +8,13 @@ interface MetadataEditorProps {
   collectionName: string;
   record: RecordInfo;
   onSaved: () => void;
+}
+
+/** Imperative handle so the `e` keyboard shortcut (technical-spec §6.3) can
+ * enter edit mode from App.tsx without lifting all of this component's
+ * editing state up. */
+export interface MetadataEditorHandle {
+  startEdit: () => void;
 }
 
 type DiffKind = "added" | "removed" | "changed";
@@ -73,11 +81,10 @@ function diffColorClass(kind: DiffKind): string {
   }
 }
 
-export default function MetadataEditor({
-  collectionName,
-  record,
-  onSaved,
-}: MetadataEditorProps) {
+function MetadataEditor(
+  { collectionName, record, onSaved }: MetadataEditorProps,
+  ref: ForwardedRef<MetadataEditorHandle>
+) {
   const [editing, setEditing] = useState(false);
   const [metadataText, setMetadataText] = useState("");
   const [uriText, setUriText] = useState("");
@@ -108,6 +115,8 @@ export default function MetadataEditor({
     setSaveError(null);
     setEditing(true);
   }
+
+  useImperativeHandle(ref, () => ({ startEdit }));
 
   function cancelEdit() {
     setEditing(false);
@@ -362,3 +371,5 @@ export default function MetadataEditor({
     </div>
   );
 }
+
+export default forwardRef(MetadataEditor);

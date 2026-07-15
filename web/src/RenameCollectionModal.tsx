@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useFocusTrap } from "./useFocusTrap";
 
 interface RenameCollectionModalProps {
   currentName: string;
@@ -23,6 +24,8 @@ export default function RenameCollectionModal({
   const [confirmText, setConfirmText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  useFocusTrap(containerRef);
 
   const matches = confirmText === currentName;
 
@@ -41,7 +44,13 @@ export default function RenameCollectionModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="w-full max-w-sm rounded border border-slate-700 bg-slate-900 p-4 shadow-xl">
+      <div
+        ref={containerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Rename collection"
+        className="w-full max-w-sm rounded border border-slate-700 bg-slate-900 p-4 shadow-xl"
+      >
         <h2 className="mb-2 text-sm font-semibold text-slate-100">Rename collection</h2>
 
         {step === "name" && (

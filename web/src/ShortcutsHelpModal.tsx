@@ -1,20 +1,28 @@
-import { SHORTCUTS } from "./shortcuts";
+import { useRef } from "react";
+import { EDIT_SHORTCUTS, SHORTCUTS } from "./shortcuts";
+import { useFocusTrap } from "./useFocusTrap";
 
 interface ShortcutsHelpModalProps {
   onClose: () => void;
+  /** Show the edit-mode section (technical-spec §6.3 e/s/d rows) too. */
+  isWriteMode: boolean;
 }
 
 /**
  * Shortcut help modal (technical-spec §6.3). Closes on esc (handled by
  * useKeyboardShortcuts), background click, or the close button.
  */
-function ShortcutsHelpModal({ onClose }: ShortcutsHelpModalProps) {
+function ShortcutsHelpModal({ onClose, isWriteMode }: ShortcutsHelpModalProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  useFocusTrap(containerRef);
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
       onClick={onClose}
     >
       <div
+        ref={containerRef}
         role="dialog"
         aria-modal="true"
         aria-label="Keyboard shortcuts"
@@ -48,6 +56,28 @@ function ShortcutsHelpModal({ onClose }: ShortcutsHelpModalProps) {
             ))}
           </tbody>
         </table>
+
+        {isWriteMode && (
+          <>
+            <h3 className="mb-1 mt-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Editing (write mode)
+            </h3>
+            <table className="w-full text-sm">
+              <tbody>
+                {EDIT_SHORTCUTS.map((s) => (
+                  <tr key={s.keys} className="border-t border-slate-800 first:border-t-0">
+                    <td className="py-1.5 pr-3 align-top">
+                      <kbd className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-xs text-slate-200">
+                        {s.keys}
+                      </kbd>
+                    </td>
+                    <td className="py-1.5 align-top text-slate-300">{s.action}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
       </div>
     </div>
   );

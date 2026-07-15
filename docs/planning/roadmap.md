@@ -38,7 +38,7 @@
 - [x] M2-5: 初回 write 前バックアップ (Issue #18)
 - [x] M2-6: audit log（`.chromaw/audit.jsonl`） (Issue #19)
 - [x] M2-7: 削除・rename の対象名入力確認フロー (Issue #20)
-- [ ] M2-8: `.chromaw/lock` による多重起動ガード
+- [x] M2-8: `.chromaw/lock` による多重起動ガード (Issue #21)
 - [ ] M2-9: 編集系キーボードショートカット
 
 ## Milestone 3: Query / re-embedding

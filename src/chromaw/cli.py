@@ -10,7 +10,8 @@ import uvicorn
 
 from chromaw import __version__
 from chromaw.chroma_adapter import ChromaAdapter
-from chromaw.errors import ChromawError
+from chromaw.errors import ChromawError, LockHeldError
+from chromaw.lock import ChromawLock
 from chromaw.security import generate_token
 from chromaw.server import create_app
 
@@ -129,19 +130,30 @@ def main(
     resolved_port = _resolve_port(host, port)
     display_host = "127.0.0.1" if host == "0.0.0.0" else host
     url = f"http://{_format_host_for_url(display_host)}:{resolved_port}"
-    typer.echo(f"chromaw is running at {url}")
 
-    def open_browser() -> None:
-        if not no_open:
-            webbrowser.open(url)
+    lock = ChromawLock(adapter.path, host=host, port=resolved_port)
+    try:
+        lock.acquire()
+    except LockHeldError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1)
 
-    token = generate_token()
-    fastapi_app = create_app(
-        adapter,
-        write=write,
-        token=token,
-        host=host,
-        port=resolved_port,
-        on_startup=open_browser,
-    )
-    uvicorn.run(fastapi_app, host=host, port=resolved_port)
+    try:
+        typer.echo(f"chromaw is running at {url}")
+
+        def open_browser() -> None:
+            if not no_open:
+                webbrowser.open(url)
+
+        token = generate_token()
+        fastapi_app = create_app(
+            adapter,
+            write=write,
+            token=token,
+            host=host,
+            port=resolved_port,
+            on_startup=open_browser,
+        )
+        uvicorn.run(fastapi_app, host=host, port=resolved_port)
+    finally:
+        lock.release()

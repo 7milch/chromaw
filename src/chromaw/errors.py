@@ -59,6 +59,11 @@ class CollectionAlreadyExistsError(ChromawError):
     existing collection in the same ChromaDB directory."""
 
 
+class LockHeldError(ChromawError):
+    """Raised when ``.chromaw/lock`` (technical-spec §9.3) is already held
+    by another live chromaw process against the same ChromaDB directory."""
+
+
 class AuditWriteFailedError(ChromawError):
     """Raised when an audit log entry (technical-spec §9.2) could not be
     appended to ``.chromaw/audit.jsonl``. chromaw treats audit logging as

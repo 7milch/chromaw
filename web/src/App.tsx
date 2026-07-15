@@ -6,6 +6,7 @@ import {
   exportSelectedRecords,
   type ExportFilters,
 } from "./export";
+import { downloadCollectionJsonl, importCollectionJsonl } from "./jsonl";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import ConfirmNameModal from "./ConfirmNameModal";
 import DocumentEditor, { type DocumentEditorHandle } from "./DocumentEditor";
@@ -16,6 +17,7 @@ import type {
   BulkDeleteResponse,
   CollectionInfo,
   CollectionsResponse,
+  ImportResponse,
   QueryRequest,
   QueryResponse,
   RecordInfo,
@@ -187,6 +189,17 @@ function App() {
   const [selectedExportError, setSelectedExportError] = useState<string | null>(null);
   const [selectedExportTruncated, setSelectedExportTruncated] = useState(false);
   const selectedExportAbortRef = useRef<AbortController | null>(null);
+
+  // JSONL import/export (M4-3, technical-spec §8). Export streams straight
+  // from the server (jsonl.ts's downloadCollectionJsonl), so unlike the JSON
+  // export above it has no client-side progress/cancel/truncation to track.
+  const [jsonlExportError, setJsonlExportError] = useState<string | null>(null);
+  const [importRunning, setImportRunning] = useState(false);
+  const [importMode, setImportMode] = useState<"add" | "upsert">("add");
+  const [importResult, setImportResult] = useState<ImportResponse | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
+
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const metadataEditorRef = useRef<MetadataEditorHandle | null>(null);
   const documentEditorRef = useRef<DocumentEditorHandle | null>(null);
@@ -617,6 +630,43 @@ function App() {
     exportAbortRef.current?.abort();
   }
 
+  async function startJsonlExport() {
+    if (!selectedName) return;
+    setJsonlExportError(null);
+    try {
+      await downloadCollectionJsonl(selectedName);
+    } catch (err) {
+      setJsonlExportError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function triggerImportFilePicker() {
+    setImportError(null);
+    setImportResult(null);
+    importFileInputRef.current?.click();
+  }
+
+  async function handleImportFileChosen(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    // Reset so choosing the same file again still fires onChange.
+    event.target.value = "";
+    if (!file || !selectedName) return;
+
+    setImportRunning(true);
+    setImportError(null);
+    setImportResult(null);
+    try {
+      const result = await importCollectionJsonl(selectedName, file, importMode);
+      setImportResult(result);
+      setRecordsRefreshTick((t) => t + 1);
+      setCollectionsRefreshTick((t) => t + 1);
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImportRunning(false);
+    }
+  }
+
   /**
    * Shared error-extraction for the delete/rename fetches below (technical
    * -spec §3.2, §6.5, roadmap M2-7): surfaces the server's ``detail``
@@ -860,8 +910,67 @@ function App() {
                         Export JSON
                       </button>
                     )}
+                    <button
+                      type="button"
+                      onClick={startJsonlExport}
+                      className="rounded border border-slate-700 px-2 py-1 text-xs hover:bg-slate-800"
+                    >
+                      Export JSONL
+                    </button>
+                    {isWriteMode && (
+                      <>
+                        <select
+                          value={importMode}
+                          onChange={(e) => setImportMode(e.target.value as "add" | "upsert")}
+                          disabled={importRunning}
+                          className="rounded border border-slate-700 bg-transparent px-2 py-1 text-xs disabled:opacity-40"
+                          title="How to handle ids that already exist in the collection"
+                        >
+                          <option value="add">add</option>
+                          <option value="upsert">upsert</option>
+                        </select>
+                        <button
+                          type="button"
+                          disabled={importRunning}
+                          onClick={triggerImportFilePicker}
+                          className="rounded border border-slate-700 px-2 py-1 text-xs hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {importRunning ? "Importing..." : "Import JSONL"}
+                        </button>
+                        <input
+                          ref={importFileInputRef}
+                          type="file"
+                          accept=".jsonl,application/x-ndjson,text/plain"
+                          onChange={handleImportFileChosen}
+                          className="hidden"
+                        />
+                      </>
+                    )}
                   </div>
                 </div>
+                {jsonlExportError && (
+                  <p className="border-t border-slate-800 px-3 py-1 text-xs text-red-400">
+                    Export JSONL failed: {jsonlExportError}
+                  </p>
+                )}
+                {importError && (
+                  <p className="border-t border-slate-800 px-3 py-1 text-xs text-red-400">
+                    Import failed: {importError}
+                  </p>
+                )}
+                {importResult && (
+                  <p className="border-t border-slate-800 px-3 py-1 text-xs text-slate-400">
+                    Imported {importResult.imported.length} record
+                    {importResult.imported.length === 1 ? "" : "s"}
+                    {importResult.skipped.length > 0
+                      ? ` (${importResult.skipped.length} skipped: ${importResult.skipped
+                          .slice(0, 3)
+                          .map((s) => `line ${s.line} - ${s.reason}`)
+                          .join("; ")}${importResult.skipped.length > 3 ? "; ..." : ""})`
+                      : ""}
+                    .
+                  </p>
+                )}
                 {exportError && (
                   <p className="border-t border-slate-800 px-3 py-1 text-xs text-red-400">
                     Export failed: {exportError}

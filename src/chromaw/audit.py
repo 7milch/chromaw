@@ -12,6 +12,7 @@ from chromaw.errors import AuditWriteFailedError
 
 _CHROMAW_DIRNAME = ".chromaw"
 _AUDIT_FILENAME = "audit.jsonl"
+_MAX_LOGGED_SKIPPED = 50
 
 
 @dataclass
@@ -184,6 +185,48 @@ class AuditLogger:
             "operation": "collection.update",
             "collection": collection,
             "changes": {"metadata": {"before": before, "after": after}},
+            "user_agent": f"chromaw/{__version__}",
+        }
+        self._append(entry)
+
+    def log_import(
+        self,
+        *,
+        collection: str,
+        mode: str,
+        imported: list[str],
+        skipped: list[dict[str, Any]],
+    ) -> None:
+        """Append a ``record.import`` entry for a JSONL import operation
+        (roadmap M4-3, technical-spec §8, §9.2).
+
+        ``imported`` lists the ids actually written (in file order);
+        ``skipped`` is the same ``{"line": int, "reason": str}`` shape
+        returned to the caller by ``POST .../import`` (``ImportSkip``,
+        JSON-serialized), covering both parse-level and adapter-level
+        skips. Unlike ``log_bulk_delete_records`` (which omits the entry
+        entirely when nothing was deleted), an import entry is always
+        written even if ``imported`` ends up empty -- a file that was
+        processed but contained only skippable rows is still something the
+        operator will want a record of having attempted, matching this
+        endpoint always returning 200 rather than an error in that case.
+
+        Only the first ``_MAX_LOGGED_SKIPPED`` (50) entries of ``skipped``
+        are actually written to the audit line; the full count is recorded
+        separately as ``skipped_total`` so a large, mostly-unusable import
+        file (thousands of skipped rows) can't blow up ``audit.jsonl`` --
+        the API response to the caller (``ImportResponse.skipped``) is
+        unaffected by this truncation and still contains every skip.
+        """
+
+        entry = {
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "operation": "record.import",
+            "collection": collection,
+            "mode": mode,
+            "imported": imported,
+            "skipped": skipped[:_MAX_LOGGED_SKIPPED],
+            "skipped_total": len(skipped),
             "user_agent": f"chromaw/{__version__}",
         }
         self._append(entry)

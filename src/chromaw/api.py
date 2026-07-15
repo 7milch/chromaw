@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import difflib
+import json
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import StreamingResponse
 
 from chromaw import __version__
+from chromaw.chroma_adapter import ImportEntry
 from chromaw.errors import (
     CollectionNotFoundError,
     ConfirmationMismatchError,
@@ -21,6 +24,8 @@ from chromaw.models import (
     DiffRequest,
     DiffResponse,
     HealthResponse,
+    ImportResponse,
+    ImportSkip,
     QueryRequest,
     QueryResponse,
     RecordDeleteRequest,
@@ -31,6 +36,9 @@ from chromaw.models import (
 )
 
 router = APIRouter(prefix="/api")
+
+_EXPORT_BATCH_SIZE = 500
+_VALID_IMPORT_MODES = {"add", "upsert"}
 
 _VALID_INCLUDE_VALUES = {"documents", "metadatas", "uris", "embeddings"}
 # Query results additionally support "distances" (chromadb's collection.query()
@@ -524,3 +532,191 @@ def post_query(
         include=include_values,
     )
     return QueryResponse(matches=matches)
+
+
+@router.get("/collections/{name}/export.jsonl")
+def get_export_jsonl(name: str, request: Request) -> StreamingResponse:
+    """Stream every record of a collection as JSON Lines, one record per
+    line (roadmap M4-3, technical-spec §8).
+
+    A read operation, like ``post_records_get``/``post_query`` -- available
+    in read-only mode. Existence of the collection is checked up front (via
+    ``_find_collection``, 404 if missing) before any streaming begins, so a
+    typo'd collection name fails fast with a normal JSON error body rather
+    than starting a 200 response and failing mid-stream.
+
+    Each line is ``{"id", "document", "metadata", "uri", "embedding"}`` --
+    unlike ``RecordInfo`` (used by the paged ``GET .../records`` /
+    ``POST .../records/get`` endpoints), ``embedding`` here is the record's
+    *full* vector rather than an 8-value preview, so the exported file can be
+    fed straight back through ``POST .../import`` for a lossless round trip.
+    ``adapter.iter_records`` fetches records in fixed-size batches internally
+    (``_EXPORT_BATCH_SIZE``), so memory use here stays bounded to one batch
+    regardless of collection size.
+    """
+
+    _find_collection(request, name)
+    adapter = request.app.state.adapter
+
+    def _generate():
+        for record in adapter.iter_records(name, batch_size=_EXPORT_BATCH_SIZE):
+            yield json.dumps(record, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(
+        _generate(),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": f'attachment; filename="{name}.jsonl"'},
+    )
+
+
+@router.post(
+    "/collections/{name}/import",
+    response_model=ImportResponse,
+    dependencies=[Depends(require_write_mode)],
+)
+async def post_import(
+    name: str,
+    request: Request,
+    file: UploadFile = File(...),
+    mode: str = Form(default="add"),
+) -> ImportResponse:
+    """Import records from an uploaded JSON Lines file (roadmap M4-3,
+    technical-spec §8).
+
+    Each line is parsed independently; a line that fails to parse (invalid
+    JSON, not an object, missing/empty/non-string ``id``, or a duplicate
+    ``id`` already seen earlier in the same file) is skipped and reported
+    back with its 1-indexed line number and a reason -- it does not fail the
+    whole request, and a file where every line is unusable still returns 200
+    with an empty ``imported`` and a full ``skipped`` list. Blank lines are
+    silently ignored (not counted as skips). A leading UTF-8 BOM (``﻿``,
+    common in files produced by Excel/Windows tools) is stripped from the
+    decoded text before parsing begins, so it doesn't corrupt the first
+    line's JSON.
+
+    The full uploaded file is read into memory (``await file.read()``)
+    before parsing -- unlike ``iter_records``/``export.jsonl``'s streaming
+    read, there is no bounded-memory guarantee here, so very large import
+    files should be split by the caller.
+
+    ``mode`` (``"add"`` default, or ``"upsert"``) controls what happens when
+    a row's ``id`` already exists in the collection: ``"add"`` rejects it as
+    a skip (``"id already exists"``), ``"upsert"`` overwrites it. See
+    ``ChromaAdapter.import_records`` for how rows with/without an explicit
+    ``embedding`` are written, and why a batch write failure is reported
+    against every row in that batch rather than a single offending row.
+
+    Follows the same backup-then-mutate-then-audit sequence as the other
+    write endpoints; the collection's existence is checked (via
+    ``_find_collection``, 404 if missing) before the file is even read, so
+    an unknown collection name doesn't waste effort parsing the upload.
+    """
+
+    if mode not in _VALID_IMPORT_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"mode must be one of {sorted(_VALID_IMPORT_MODES)}, got {mode!r}",
+        )
+
+    backup_manager = request.app.state.backup_manager
+    if backup_manager is not None:
+        backup_manager.ensure_backup()
+
+    _find_collection(request, name)
+
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"file is not valid UTF-8: {exc}") from exc
+    text = text.lstrip("﻿")
+
+    entries: list[ImportEntry] = []
+    skipped: list[ImportSkip] = []
+    seen_ids: set[str] = set()
+
+    line_number = 0
+    for raw_line in text.splitlines():
+        line_number += 1
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as exc:
+            skipped.append(ImportSkip(line=line_number, reason=f"invalid JSON: {exc}"))
+            continue
+
+        if not isinstance(obj, dict):
+            skipped.append(ImportSkip(line=line_number, reason="line is not a JSON object"))
+            continue
+
+        record_id = obj.get("id")
+        if not isinstance(record_id, str) or not record_id:
+            skipped.append(
+                ImportSkip(line=line_number, reason="missing or invalid non-empty 'id'")
+            )
+            continue
+
+        if record_id in seen_ids:
+            skipped.append(
+                ImportSkip(
+                    line=line_number,
+                    reason=f"duplicate id already seen earlier in this file: {record_id!r}",
+                )
+            )
+            continue
+        seen_ids.add(record_id)
+
+        document = obj.get("document")
+        if document is not None and not isinstance(document, str):
+            skipped.append(ImportSkip(line=line_number, reason="'document' must be a string"))
+            continue
+
+        metadata = obj.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            skipped.append(ImportSkip(line=line_number, reason="'metadata' must be an object"))
+            continue
+
+        uri = obj.get("uri")
+        if uri is not None and not isinstance(uri, str):
+            skipped.append(ImportSkip(line=line_number, reason="'uri' must be a string"))
+            continue
+
+        embedding = obj.get("embedding")
+        if embedding is not None and (
+            not isinstance(embedding, list)
+            or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in embedding)
+        ):
+            skipped.append(
+                ImportSkip(line=line_number, reason="'embedding' must be a list of numbers")
+            )
+            continue
+
+        entries.append(
+            ImportEntry(
+                line=line_number,
+                id=record_id,
+                document=document,
+                metadata=metadata,
+                uri=uri,
+                embedding=[float(v) for v in embedding] if embedding is not None else None,
+            )
+        )
+
+    adapter = request.app.state.adapter
+    imported, adapter_errors = adapter.import_records(name, entries, mode=mode)
+    skipped.extend(ImportSkip(line=e["line"], reason=e["reason"]) for e in adapter_errors)
+    skipped.sort(key=lambda s: s.line)
+
+    audit_logger = request.app.state.audit_logger
+    if audit_logger is not None:
+        audit_logger.log_import(
+            collection=name,
+            mode=mode,
+            imported=imported,
+            skipped=[s.model_dump() for s in skipped],
+        )
+
+    return ImportResponse(imported=imported, skipped=skipped)

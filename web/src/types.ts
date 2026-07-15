@@ -111,3 +111,13 @@ export interface RecordMatchInfo {
 export interface QueryResponse {
   matches: RecordMatchInfo[];
 }
+
+export interface ImportSkip {
+  line: number;
+  reason: string;
+}
+
+export interface ImportResponse {
+  imported: string[];
+  skipped: ImportSkip[];
+}

@@ -3,7 +3,7 @@ from pathlib import Path
 import chromadb
 import pytest
 
-from chromaw.chroma_adapter import ChromaAdapter
+from chromaw.chroma_adapter import ChromaAdapter, ImportEntry
 from chromaw.errors import (
     ChromaEmptyDirectoryError,
     ChromaInvalidDirectoryError,
@@ -1513,3 +1513,186 @@ def test_query_records_embeddings_excluded_from_include_leaves_fields_none(
         assert m.embedding_dimension is None
         assert m.embedding_preview is None
         assert m.distance is not None
+
+
+# --- iter_records / import_records (roadmap M4-3, technical-spec §8) -----
+
+
+def _add_iter_records(path: Path, count: int) -> None:
+    client_lib = chromadb.PersistentClient(path=str(path))
+    collection = client_lib.create_collection("foo")
+    collection.add(
+        ids=[str(i) for i in range(count)],
+        documents=[f"doc-{i}" for i in range(count)],
+        metadatas=[{"idx": i} for i in range(count)],
+        embeddings=[[float(i), float(i) + 1] for i in range(count)],
+    )
+
+
+def test_iter_records_yields_all_records_across_batches(tmp_path: Path) -> None:
+    _add_iter_records(tmp_path, 7)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    records = list(adapter.iter_records("foo", batch_size=3))
+
+    assert sorted(r["id"] for r in records) == [str(i) for i in range(7)]
+    by_id = {r["id"]: r for r in records}
+    assert by_id["3"]["document"] == "doc-3"
+    assert by_id["3"]["metadata"] == {"idx": 3}
+    assert by_id["3"]["embedding"] == [3.0, 4.0]
+
+
+def test_iter_records_empty_collection_yields_nothing(tmp_path: Path) -> None:
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("empty")
+    adapter = ChromaAdapter.open(tmp_path)
+
+    assert list(adapter.iter_records("empty")) == []
+
+
+def test_iter_records_nonexistent_collection_raises(tmp_path: Path) -> None:
+    chromadb.PersistentClient(path=str(tmp_path))
+    adapter = ChromaAdapter.open(tmp_path)
+
+    with pytest.raises(CollectionNotFoundError):
+        list(adapter.iter_records("missing"))
+
+
+def test_import_records_add_mode_writes_new_records(tmp_path: Path) -> None:
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    adapter = ChromaAdapter.open(tmp_path)
+
+    entries = [
+        ImportEntry(line=1, id="a", document="doc a", embedding=[1.0, 2.0]),
+        ImportEntry(line=2, id="b", document="doc b", embedding=[3.0, 4.0]),
+    ]
+    imported, errors = adapter.import_records("foo", entries, mode="add")
+
+    assert sorted(imported) == ["a", "b"]
+    assert errors == []
+
+    records, _, _ = adapter.get_records("foo", ids=["a", "b"], include=("documents",))
+    assert {r.id: r.document for r in records} == {"a": "doc a", "b": "doc b"}
+
+
+def test_import_records_add_mode_rejects_existing_id(tmp_path: Path) -> None:
+    _add_iter_records(tmp_path, 1)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    entries = [ImportEntry(line=1, id="0", document="new doc", embedding=[9.0, 9.0])]
+    imported, errors = adapter.import_records("foo", entries, mode="add")
+
+    assert imported == []
+    assert len(errors) == 1
+    assert errors[0]["line"] == 1
+    assert "already exists" in errors[0]["reason"]
+
+
+def test_import_records_upsert_mode_overwrites_existing_id(tmp_path: Path) -> None:
+    _add_iter_records(tmp_path, 1)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    entries = [ImportEntry(line=1, id="0", document="new doc", embedding=[9.0, 9.0])]
+    imported, errors = adapter.import_records("foo", entries, mode="upsert")
+
+    assert imported == ["0"]
+    assert errors == []
+    records, _, _ = adapter.get_records("foo", ids=["0"], include=("documents",))
+    assert records[0].document == "new doc"
+
+
+def test_iter_records_default_batch_size_across_many_pages(tmp_path: Path) -> None:
+    # Exercises the default batch_size=500 offset loop across several full
+    # pages plus a partial final page, catching off-by-one bugs that a
+    # small fixture (e.g. count=7, batch_size=3) could hide.
+    _add_iter_records(tmp_path, 1301)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    records = list(adapter.iter_records("foo"))
+
+    ids = [r["id"] for r in records]
+    assert len(ids) == 1301
+    assert len(set(ids)) == 1301
+    assert sorted(ids, key=int) == [str(i) for i in range(1301)]
+
+
+def test_import_records_nonexistent_collection_raises(tmp_path: Path) -> None:
+    chromadb.PersistentClient(path=str(tmp_path))
+    adapter = ChromaAdapter.open(tmp_path)
+
+    with pytest.raises(CollectionNotFoundError):
+        adapter.import_records("missing", [ImportEntry(line=1, id="a")], mode="add")
+
+
+def test_import_records_empty_entries_returns_empty(tmp_path: Path) -> None:
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    adapter = ChromaAdapter.open(tmp_path)
+
+    imported, errors = adapter.import_records("foo", [], mode="add")
+
+    assert imported == []
+    assert errors == []
+
+
+def test_import_records_chunks_batches_by_max_batch_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # get_max_batch_size() monkeypatched to a small value (5) so 12 rows
+    # must be split into 3 chunked collection.add() calls (5 + 5 + 2)
+    # instead of one call that would exceed chromadb's real max batch size.
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    adapter = ChromaAdapter.open(tmp_path)
+    monkeypatch.setattr(adapter._client, "get_max_batch_size", lambda: 5)
+
+    entries = [
+        ImportEntry(line=i, id=str(i), document=f"doc {i}", embedding=[float(i), 0.0])
+        for i in range(12)
+    ]
+    imported, errors = adapter.import_records("foo", entries, mode="add")
+
+    assert sorted(imported, key=int) == [str(i) for i in range(12)]
+    assert errors == []
+
+    records, _, _ = adapter.get_records(
+        "foo", ids=[str(i) for i in range(12)], include=("documents",)
+    )
+    assert len(records) == 12
+
+
+def test_import_records_one_chunk_failure_does_not_affect_other_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A batch-write failure in one chunk (simulated here by an embedding
+    # dimension mismatch within that chunk) must only skip that chunk's
+    # rows; other chunks, written in separate collection.add() calls, still
+    # succeed.
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    adapter = ChromaAdapter.open(tmp_path)
+    monkeypatch.setattr(adapter._client, "get_max_batch_size", lambda: 5)
+
+    entries = [
+        ImportEntry(line=i, id=str(i), document=f"doc {i}", embedding=[float(i), 0.0])
+        for i in range(5)
+    ]
+    # Second chunk (lines 5-9) has a mismatched embedding dimension (3
+    # instead of 2), which chromadb rejects for the whole collection.add()
+    # call covering that chunk.
+    entries += [
+        ImportEntry(
+            line=i, id=str(i), document=f"doc {i}", embedding=[float(i), 0.0, 0.0]
+        )
+        for i in range(5, 10)
+    ]
+    entries += [
+        ImportEntry(line=i, id=str(i), document=f"doc {i}", embedding=[float(i), 0.0])
+        for i in range(10, 12)
+    ]
+
+    imported, errors = adapter.import_records("foo", entries, mode="add")
+
+    assert sorted(imported, key=int) == [str(i) for i in [0, 1, 2, 3, 4, 10, 11]]
+    assert sorted(e["line"] for e in errors) == [5, 6, 7, 8, 9]

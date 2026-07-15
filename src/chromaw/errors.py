@@ -88,3 +88,15 @@ class InvalidQueryEmbeddingError(ChromawError):
     chromadb rejects (e.g. wrong dimension for the collection, wrong shape).
     Unlike ``EmbeddingFunctionUnavailableError`` this is a genuine client
     error -- the caller supplied a bad vector -- so it is mapped to 422."""
+
+
+class EmbeddingConfigError(ChromawError):
+    """Raised when ``--embedding-config`` (technical-spec §5.6 4) points at a
+    file that cannot be read, is not valid JSON, has an unsupported
+    ``provider``, or is missing an ``api_key_env`` (or the environment
+    variable it names) for a provider that requires an API key. Unlike
+    ``EmbeddingFunctionUnavailableError`` (which covers *runtime* embedding
+    failures against a query), this is a configuration problem the caller
+    can fix by editing the config file or their environment, and is raised
+    eagerly at CLI startup so it fails fast rather than surfacing on the
+    first text search."""

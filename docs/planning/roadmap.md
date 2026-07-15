@@ -44,7 +44,7 @@
 ## Milestone 3: Query / re-embedding
 
 - [x] M3-1: query API と UI (Issue #23)
-- [ ] M3-2: `--embedding-config` と解決優先順位
+- [x] M3-2: `--embedding-config` と解決優先順位 (Issue #24)
 - [ ] M3-3: document edit + re-embed
 - [ ] M3-4: stale フラグ表示
 

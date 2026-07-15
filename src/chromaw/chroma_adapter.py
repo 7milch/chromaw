@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import chromadb
 from chromadb.errors import ChromaError
 
+from chromaw.embedding import EmbeddingResolver
 from chromaw.errors import (
     ChromaEmptyDirectoryError,
     ChromaInvalidDirectoryError,
@@ -38,10 +39,16 @@ class ChromaAdapter:
 
     path: Path
     _client: Any
+    embedding_resolver: EmbeddingResolver = field(default_factory=EmbeddingResolver)
 
     @classmethod
     def open(cls, path: Path, create: bool = False) -> "ChromaAdapter":
         """Open (and optionally create) a ChromaDB persistent directory.
+
+        ``embedding_resolver`` (technical-spec §5.6 4, M3-2) is left at its
+        default (no explicit ``--embedding-config``) here; callers that want
+        one set ``adapter.embedding_resolver`` afterwards -- it has nothing
+        to do with opening the ChromaDB directory itself.
 
         Raises:
             ChromaPathNotFoundError: path does not exist and create is False.
@@ -384,7 +391,17 @@ class ChromaAdapter:
             "n_results": n_results,
             "include": list(include),
         }
-        if query_text is not None:
+        if query_text is not None and self.embedding_resolver.has_explicit_config:
+            # Tier 1 (technical-spec §5.6 4): an explicit --embedding-config
+            # always wins over the collection's own embedding function, so
+            # embed the query text ourselves and query by vector instead of
+            # letting collection.query() use its own configured EF.
+            embedded = self.embedding_resolver.embed_query(query_text)
+            query_kwargs["query_embeddings"] = [embedded]
+        elif query_text is not None:
+            # Tiers 2/3: no explicit config, so defer to chromadb -- it uses
+            # the collection's own embedding function if configured, else
+            # its default embedding function, else raises (caught below).
             query_kwargs["query_texts"] = [query_text]
         else:
             query_kwargs["query_embeddings"] = [query_embedding]

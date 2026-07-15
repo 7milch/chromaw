@@ -10,6 +10,7 @@ import uvicorn
 
 from chromaw import __version__
 from chromaw.chroma_adapter import ChromaAdapter
+from chromaw.embedding import EmbeddingConfig, EmbeddingResolver
 from chromaw.errors import ChromawError, LockHeldError
 from chromaw.lock import ChromawLock
 from chromaw.security import generate_token
@@ -95,6 +96,16 @@ def main(
         "--create",
         help="Create the ChromaDB persistent directory if it does not exist or is empty.",
     ),
+    embedding_config: Optional[str] = typer.Option(
+        None,
+        "--embedding-config",
+        help=(
+            "Path to a JSON file describing the embedding function used for "
+            "query-text search (technical-spec §5.6 4). If given, it takes "
+            "priority over the collection's own embedding function and "
+            "chromadb's default. See docs/technical-spec.md for the file format."
+        ),
+    ),
     version: Optional[bool] = typer.Option(
         None,
         "--version",
@@ -123,6 +134,19 @@ def main(
     except ChromawError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1)
+
+    if embedding_config is not None:
+        try:
+            config = EmbeddingConfig.load(Path(embedding_config))
+            # Fail fast if a hosted provider is missing its API key env var,
+            # rather than only discovering it on the first query (SDK
+            # construction itself stays lazy, see EmbeddingResolver).
+            config.resolve_api_key()
+        except ChromawError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=1)
+        adapter.embedding_resolver = EmbeddingResolver(config)
+        typer.echo(f"embedding config: provider={config.provider} model={config.model}")
 
     collections = adapter.list_collections()
     typer.echo(f"connected: path={adapter.path} collections={len(collections)}")

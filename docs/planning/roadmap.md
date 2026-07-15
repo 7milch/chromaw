@@ -60,7 +60,7 @@
 
 - [x] R-1: wheel packaging（static 同梱、Node.js 不要であることの検証） (Issue #33)
 - [x] R-2: pipx / uvx 動作確認 (Issue #34)
-- [ ] R-3: PyPI 公開
+- [ ] R-3: PyPI 公開 (Issue #35 — PyPI credentials 待ち。手順は issue に記録済み)
 
 ---
 

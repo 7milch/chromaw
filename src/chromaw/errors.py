@@ -70,3 +70,21 @@ class AuditWriteFailedError(ChromawError):
     fail-closed: if a write operation cannot be recorded, the caller must
     not treat the operation as successfully completed and must surface an
     error rather than silently skip the audit trail."""
+
+
+class EmbeddingFunctionUnavailableError(ChromawError):
+    """Raised when ``query_records`` is given ``query_text`` but the
+    collection's embedding function is unavailable or fails while embedding
+    it (technical-spec §5.6 4, §8.4). This is not the client's fault in the
+    "malformed request" sense (unlike ``InvalidFilterError``/
+    ``InvalidQueryEmbeddingError``), so it is mapped to 503 rather than 422:
+    the request is well-formed but the server currently cannot fulfil a
+    text-based query (e.g. no embedding function configured, or the default
+    embedding function's model could not be loaded)."""
+
+
+class InvalidQueryEmbeddingError(ChromawError):
+    """Raised when ``query_records`` is given a ``query_embedding`` that
+    chromadb rejects (e.g. wrong dimension for the collection, wrong shape).
+    Unlike ``EmbeddingFunctionUnavailableError`` this is a genuine client
+    error -- the caller supplied a bad vector -- so it is mapped to 422."""

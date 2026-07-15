@@ -13,11 +13,13 @@ from chromaw.errors import (
     ChromaPathNotFoundError,
     CollectionAlreadyExistsError,
     CollectionNotFoundError,
+    EmbeddingFunctionUnavailableError,
     InvalidCollectionNameError,
     InvalidFilterError,
+    InvalidQueryEmbeddingError,
     RecordNotFoundError,
 )
-from chromaw.models import CollectionInfo, RecordInfo
+from chromaw.models import CollectionInfo, RecordInfo, RecordMatchInfo
 
 _SQLITE_FILENAME = "chroma.sqlite3"
 
@@ -318,6 +320,127 @@ class ChromaAdapter:
             )
 
         return records, total, has_more
+
+    def query_records(
+        self,
+        name: str,
+        *,
+        query_text: str | None = None,
+        query_embedding: list[float] | None = None,
+        n_results: int = 10,
+        where: dict | None = None,
+        where_document: dict | None = None,
+        include: tuple[str, ...] = ("documents", "metadatas", "uris", "distances"),
+    ) -> list[RecordMatchInfo]:
+        """Run a similarity search against the collection named ``name``
+        (technical-spec §5.6 4, §8.4).
+
+        Exactly one of ``query_text``/``query_embedding`` must be given by
+        the caller (enforced by ``QueryRequest`` at the API layer):
+        ``query_text`` is embedded via the collection's configured embedding
+        function (technical-spec §5.6 4's priority order --
+        ``--embedding-config`` if given, else chromadb's default embedding
+        function); ``query_embedding`` is used as-is, bypassing the
+        embedding function entirely.
+
+        Unlike ``get_records``, chromadb's ``collection.query()`` supports
+        ``"distances"`` directly as an ``include`` value (there is no
+        "uris"-style fallback dance needed here).
+
+        Any ``ChromaError``/``ValueError``/``TypeError`` raised by
+        ``collection.query()`` is reclassified the same way ``get_records``
+        does for filters, with two additions specific to querying:
+
+        - a malformed ``where``/``where_document`` filter (checked first,
+          same priority as ``get_records``) raises ``InvalidFilterError``
+          (422);
+        - otherwise, for a ``query_text`` query, the failure is attributed to
+          the embedding function (unavailable, failed to load/run) and
+          raises ``EmbeddingFunctionUnavailableError`` (503) -- the request
+          itself is well-formed, the server just currently can't fulfil a
+          text-based query;
+        - otherwise (a ``query_embedding`` query), the failure is attributed
+          to the caller-supplied vector (e.g. wrong dimension for the
+          collection) and raises ``InvalidQueryEmbeddingError`` (422).
+
+        ``embedding_dimension``/``embedding_preview`` (first 8 values) are
+        only populated when ``"embeddings"`` is present in ``include``, same
+        as ``get_records``.
+
+        Raises:
+            CollectionNotFoundError: no collection named ``name`` exists.
+            InvalidFilterError: ``where``/``where_document`` is malformed.
+            EmbeddingFunctionUnavailableError: ``query_text`` was given but
+                the collection's embedding function is unavailable or failed.
+            InvalidQueryEmbeddingError: ``query_embedding`` was given but
+                rejected by chromadb (e.g. wrong dimension).
+        """
+        try:
+            collection = self._client.get_collection(name)
+        except Exception as exc:
+            raise CollectionNotFoundError(f"collection not found: {name}") from exc
+
+        query_kwargs: dict[str, Any] = {
+            "n_results": n_results,
+            "include": list(include),
+        }
+        if query_text is not None:
+            query_kwargs["query_texts"] = [query_text]
+        else:
+            query_kwargs["query_embeddings"] = [query_embedding]
+        if where is not None:
+            query_kwargs["where"] = where
+        if where_document is not None:
+            query_kwargs["where_document"] = where_document
+
+        try:
+            result = collection.query(**query_kwargs)
+        except (ValueError, TypeError, ChromaError) as exc:
+            if where is not None or where_document is not None:
+                raise InvalidFilterError(str(exc)) from exc
+            if query_text is not None:
+                raise EmbeddingFunctionUnavailableError(str(exc)) from exc
+            raise InvalidQueryEmbeddingError(str(exc)) from exc
+
+        result_ids = (result.get("ids") or [[]])[0]
+        documents = result.get("documents")
+        documents = documents[0] if documents else None
+        metadatas = result.get("metadatas")
+        metadatas = metadatas[0] if metadatas else None
+        uris = result.get("uris")
+        uris = uris[0] if uris else None
+        distances = result.get("distances")
+        distances = distances[0] if distances else None
+        embeddings = result.get("embeddings")
+        embeddings = embeddings[0] if (embeddings is not None and "embeddings" in include) else None
+
+        matches: list[RecordMatchInfo] = []
+        for i, record_id in enumerate(result_ids):
+            document = documents[i] if documents is not None else None
+            metadata = metadatas[i] if metadatas is not None else None
+            uri = uris[i] if uris is not None else None
+            distance = distances[i] if distances is not None else None
+
+            embedding_dimension: int | None = None
+            embedding_preview: list[float] | None = None
+            if embeddings is not None and embeddings[i] is not None:
+                embedding = list(embeddings[i])
+                embedding_dimension = len(embedding)
+                embedding_preview = embedding[:8]
+
+            matches.append(
+                RecordMatchInfo(
+                    id=str(record_id),
+                    document=document,
+                    metadata=metadata,
+                    uri=uri,
+                    distance=distance,
+                    embedding_dimension=embedding_dimension,
+                    embedding_preview=embedding_preview,
+                )
+            )
+
+        return matches
 
     def update_record(
         self,

@@ -71,6 +71,66 @@ class RecordsGetRequest(BaseModel):
     )
 
 
+class RecordMatchInfo(BaseModel):
+    """A single similarity-search result within a collection
+    (technical-spec §5.6 4, §8.4).
+
+    Same shape as ``RecordInfo`` plus ``distance`` (chromadb's raw distance
+    for the collection's configured space -- lower is more similar; ``None``
+    only if ``"distances"`` was omitted from the request's ``include``).
+    """
+
+    id: str
+    document: str | None
+    metadata: dict | None
+    uri: str | None
+    distance: float | None
+    embedding_dimension: int | None
+    embedding_preview: list[float] | None
+
+
+class QueryResponse(BaseModel):
+    """Response body for ``POST /api/collections/{name}/query``."""
+
+    matches: list[RecordMatchInfo]
+
+
+class QueryRequest(BaseModel):
+    """Request body for ``POST /api/collections/{name}/query``
+    (technical-spec §5.6 4, §8.4).
+
+    Exactly one of ``query_text`` (embedded via the collection's embedding
+    function -- technical-spec §5.6 4's priority order) or
+    ``query_embedding`` (a precomputed vector, bypassing the embedding
+    function entirely) must be given; neither or both is rejected with 422.
+    ``where``/``where_document`` may additionally narrow the candidate set,
+    same semantics as ``RecordsGetRequest``.
+    """
+
+    query_text: str | None = None
+    query_embedding: list[float] | None = None
+    n_results: int = Field(default=10, ge=1, le=500)
+    where: dict | None = None
+    where_document: dict | None = None
+    include: list[str] = Field(
+        default_factory=lambda: ["documents", "metadatas", "uris", "distances"]
+    )
+
+    @model_validator(mode="after")
+    def _check_exactly_one_query_kind(self) -> "QueryRequest":
+        if (self.query_text is None) == (self.query_embedding is None):
+            raise ValueError(
+                "exactly one of query_text/query_embedding must be given"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_query_embedding_non_empty(self) -> "QueryRequest":
+        if self.query_embedding is not None and len(self.query_embedding) == 0:
+            raise ValueError("query_embedding must be a non-empty list of floats")
+        return self
+
+
 class RecordUpdateRequest(BaseModel):
     """Request body for ``PATCH /api/collections/{name}/records/{id}``
     (technical-spec §5.4, §8.3).

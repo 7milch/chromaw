@@ -77,3 +77,26 @@ export interface DiffRequest {
 export interface DiffResponse {
   diff: string;
 }
+
+export interface QueryRequest {
+  query_text?: string;
+  query_embedding?: number[];
+  n_results?: number;
+  where?: Record<string, unknown>;
+  where_document?: Record<string, unknown>;
+  include?: string[];
+}
+
+export interface RecordMatchInfo {
+  id: string;
+  document: string | null;
+  metadata: Record<string, unknown> | null;
+  uri: string | null;
+  distance: number | null;
+  embedding_dimension: number | null;
+  embedding_preview: number[] | null;
+}
+
+export interface QueryResponse {
+  matches: RecordMatchInfo[];
+}

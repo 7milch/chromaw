@@ -19,6 +19,8 @@ from chromaw.models import (
     DiffRequest,
     DiffResponse,
     HealthResponse,
+    QueryRequest,
+    QueryResponse,
     RecordDeleteRequest,
     RecordInfo,
     RecordsGetRequest,
@@ -29,6 +31,9 @@ from chromaw.models import (
 router = APIRouter(prefix="/api")
 
 _VALID_INCLUDE_VALUES = {"documents", "metadatas", "uris", "embeddings"}
+# Query results additionally support "distances" (chromadb's collection.query()
+# accepts it directly as an include value, unlike collection.get()).
+_VALID_QUERY_INCLUDE_VALUES = _VALID_INCLUDE_VALUES | {"distances"}
 
 
 def require_write_mode(request: Request) -> None:
@@ -52,13 +57,17 @@ def require_write_mode(request: Request) -> None:
         )
 
 
-def _validate_include(include_values: tuple[str, ...]) -> None:
+def _validate_include(
+    include_values: tuple[str, ...], valid: set[str] = _VALID_INCLUDE_VALUES
+) -> None:
     """Raise a 422 if any of ``include_values`` isn't a recognized field.
 
-    Shared by both the paged ``GET .../records`` endpoint and the ids-based
-    ``POST .../records/get`` endpoint so the whitelist stays consistent.
+    Shared by the paged ``GET .../records`` endpoint, the ids-based
+    ``POST .../records/get`` endpoint, and ``POST .../query`` (which passes
+    ``valid=_VALID_QUERY_INCLUDE_VALUES`` to additionally allow
+    ``"distances"``) so the whitelist stays consistent.
     """
-    invalid = [item for item in include_values if item not in _VALID_INCLUDE_VALUES]
+    invalid = [item for item in include_values if item not in valid]
     if invalid:
         raise HTTPException(
             status_code=422,
@@ -400,3 +409,36 @@ def post_records_get(
         include=include_values,
     )
     return RecordsResponse(records=records, total=total, has_more=has_more)
+
+
+@router.post("/collections/{name}/query", response_model=QueryResponse)
+def post_query(
+    name: str,
+    request: Request,
+    body: QueryRequest,
+) -> QueryResponse:
+    """Run a similarity search against a collection (technical-spec §5.6 4,
+    §8.4, roadmap M3-1).
+
+    A read operation like ``post_records_get`` above -- available in
+    read-only mode (no ``require_write_mode`` dependency). ``QueryRequest``
+    guarantees exactly one of ``query_text``/``query_embedding`` is given;
+    the adapter classifies a failure while embedding ``query_text`` as
+    ``EmbeddingFunctionUnavailableError`` (503) rather than a client error,
+    since the request itself is well-formed.
+    """
+
+    include_values = tuple(body.include)
+    _validate_include(include_values, valid=_VALID_QUERY_INCLUDE_VALUES)
+
+    adapter = request.app.state.adapter
+    matches = adapter.query_records(
+        name,
+        query_text=body.query_text,
+        query_embedding=body.query_embedding,
+        n_results=body.n_results,
+        where=body.where,
+        where_document=body.where_document,
+        include=include_values,
+    )
+    return QueryResponse(matches=matches)

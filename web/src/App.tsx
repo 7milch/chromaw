@@ -11,12 +11,17 @@ import ShortcutsHelpModal from "./ShortcutsHelpModal";
 import type {
   CollectionInfo,
   CollectionsResponse,
+  QueryRequest,
+  QueryResponse,
   RecordInfo,
+  RecordMatchInfo,
   RecordsGetRequest,
   RecordsResponse,
 } from "./types";
 
-type SearchMode = "id" | "metadata" | "document";
+type SearchMode = "id" | "metadata" | "document" | "similarity";
+
+const DEFAULT_N_RESULTS = 10;
 
 interface ActiveSearch {
   ids?: string[];
@@ -111,6 +116,19 @@ function App() {
   const [activeSearch, setActiveSearch] = useState<ActiveSearch | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
 
+  // Similarity ("query") search (technical-spec §5.6 4, §8.4, roadmap
+  // M3-1): a separate mode from the id/metadata/document search above since
+  // it hits POST .../query rather than .../records/get and returns
+  // distance-annotated matches instead of plain records. Only one of
+  // activeSearch/activeSimilarityQuery is ever set at a time.
+  const [nResultsText, setNResultsText] = useState(String(DEFAULT_N_RESULTS));
+  const [activeSimilarityQuery, setActiveSimilarityQuery] = useState<{
+    queryText: string;
+    nResults: number;
+  } | null>(null);
+  const [matches, setMatches] = useState<RecordMatchInfo[] | null>(null);
+  const [matchesError, setMatchesError] = useState<string | null>(null);
+
   const [detailRecord, setDetailRecord] = useState<RecordInfo | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -162,10 +180,64 @@ function App() {
     setActiveSearch(null);
     setSearchText("");
     setSearchError(null);
+    setActiveSimilarityQuery(null);
+    setMatches(null);
+    setMatchesError(null);
+    setNResultsText(String(DEFAULT_N_RESULTS));
   }, [selectedName]);
+
+  // Run a similarity search (technical-spec §5.6 4, §8.4) against
+  // POST .../query whenever activeSimilarityQuery is set. Independent of
+  // the id/metadata/document records fetch below -- the two search modes
+  // never run at the same time since executeSearch only ever sets one of
+  // activeSearch/activeSimilarityQuery.
+  useEffect(() => {
+    if (!selectedName || !activeSimilarityQuery) return;
+
+    let ignore = false;
+
+    const body: QueryRequest = {
+      query_text: activeSimilarityQuery.queryText,
+      n_results: activeSimilarityQuery.nResults,
+      include: ["documents", "metadatas", "uris", "distances"],
+    };
+
+    apiFetch(`/api/collections/${encodeURIComponent(selectedName)}/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          let detail = `request failed: ${res.status}`;
+          const payload = await res.json().catch(() => null);
+          if (payload && typeof payload.detail === "string") {
+            detail = payload.detail;
+          }
+          throw new Error(detail);
+        }
+        return res.json() as Promise<QueryResponse>;
+      })
+      .then((data) => {
+        if (ignore) return;
+        setMatches(data.matches);
+        setMatchesError(null);
+      })
+      .catch((err: unknown) => {
+        if (ignore) return;
+        setMatchesError(err instanceof Error ? err.message : String(err));
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, [selectedName, activeSimilarityQuery]);
 
   useEffect(() => {
     if (!selectedName) return;
+    // Similarity search is handled by the dedicated effect above; skip the
+    // records/records-get fetch entirely while it's active.
+    if (activeSimilarityQuery) return;
 
     // Guard against out-of-order responses: if selectedName/offset/search
     // change again before this request resolves, ignore its result instead
@@ -245,7 +317,7 @@ function App() {
     return () => {
       ignore = true;
     };
-  }, [selectedName, offset, activeSearch, recordsRefreshTick]);
+  }, [selectedName, offset, activeSearch, activeSimilarityQuery, recordsRefreshTick]);
 
   // Fetch full detail (including embeddings) for the selected record.
   // Same out-of-order-response guard as the records list fetch above.
@@ -327,10 +399,28 @@ function App() {
   });
 
   function executeSearch() {
+    if (searchMode === "similarity") {
+      const queryText = searchText.trim();
+      if (!queryText) {
+        setSearchError("Enter a search value.");
+        return;
+      }
+      const nResults = Number.parseInt(nResultsText, 10);
+      if (!Number.isFinite(nResults) || nResults < 1) {
+        setSearchError("n_results must be a positive integer.");
+        return;
+      }
+      setSearchError(null);
+      setActiveSearch(null);
+      setActiveSimilarityQuery({ queryText, nResults });
+      return;
+    }
+
     try {
       const parsed = parseSearchInput(searchMode, searchText);
       setSearchError(null);
       setOffset(0);
+      setActiveSimilarityQuery(null);
       setActiveSearch(parsed);
     } catch (err) {
       setSearchError(err instanceof Error ? err.message : String(err));
@@ -341,6 +431,9 @@ function App() {
     setSearchText("");
     setSearchError(null);
     setActiveSearch(null);
+    setActiveSimilarityQuery(null);
+    setMatches(null);
+    setMatchesError(null);
     setOffset(0);
   }
 
@@ -643,6 +736,7 @@ function App() {
                     <option value="id">ID</option>
                     <option value="metadata">Metadata</option>
                     <option value="document">Document</option>
+                    <option value="similarity">Similarity</option>
                   </select>
                   <input
                     ref={searchInputRef}
@@ -657,10 +751,25 @@ function App() {
                         ? "id1, id2, ..."
                         : searchMode === "metadata"
                           ? 'key=value or {"key": "value"}'
-                          : "text the document should contain"
+                          : searchMode === "similarity"
+                            ? "text to find similar records for"
+                            : "text the document should contain"
                     }
                     className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-200 placeholder:text-slate-600"
                   />
+                  {searchMode === "similarity" && (
+                    <input
+                      type="number"
+                      min={1}
+                      value={nResultsText}
+                      onChange={(e) => setNResultsText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") executeSearch();
+                      }}
+                      title="n_results"
+                      className="w-20 shrink-0 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-200"
+                    />
+                  )}
                   <button
                     type="button"
                     onClick={executeSearch}
@@ -668,7 +777,7 @@ function App() {
                   >
                     Search
                   </button>
-                  {activeSearch && (
+                  {(activeSearch || activeSimilarityQuery) && (
                     <button
                       type="button"
                       onClick={clearSearch}
@@ -681,19 +790,79 @@ function App() {
                 {searchError && <p className="text-sm text-red-400">{searchError}</p>}
               </div>
 
-              {recordsError && (
+              {activeSimilarityQuery && (
+                <>
+                  {matchesError && (
+                    <p className="text-sm text-red-400">
+                      Similarity search failed: {matchesError}
+                    </p>
+                  )}
+
+                  {!matchesError && matches === null && (
+                    <p className="text-sm text-slate-400">Searching...</p>
+                  )}
+
+                  {!matchesError && matches !== null && matches.length === 0 && (
+                    <p className="text-sm text-slate-400">No matches found.</p>
+                  )}
+
+                  {!matchesError && matches !== null && matches.length > 0 && (
+                    <div className="min-h-0 flex-1 overflow-auto rounded border border-slate-800">
+                      <table className="w-full border-collapse text-sm">
+                        <thead className="sticky top-0 bg-slate-900 text-xs uppercase tracking-wide text-slate-500">
+                          <tr>
+                            <th className="px-3 py-2 text-left font-semibold">id</th>
+                            <th className="px-3 py-2 text-left font-semibold">distance</th>
+                            <th className="px-3 py-2 text-left font-semibold">document</th>
+                            <th className="px-3 py-2 text-left font-semibold">metadata</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {matches.map((m) => (
+                            <tr
+                              key={m.id}
+                              onClick={() => setSelectedRecordId(m.id)}
+                              className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800/60 ${
+                                m.id === selectedRecordId ? "bg-slate-800 text-slate-50" : ""
+                              }`}
+                            >
+                              <td className="max-w-[10rem] truncate px-3 py-1.5 align-top font-mono text-xs">
+                                {m.id}
+                              </td>
+                              <td className="px-3 py-1.5 align-top font-mono text-xs text-slate-400">
+                                {m.distance !== null ? m.distance.toFixed(4) : "-"}
+                              </td>
+                              <td className="max-w-xs truncate px-3 py-1.5 align-top">
+                                {m.document ?? "-"}
+                              </td>
+                              <td className="max-w-xs truncate px-3 py-1.5 align-top text-slate-400">
+                                {summarizeMetadata(m.metadata)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {!activeSimilarityQuery && recordsError && (
                 <p className="text-sm text-red-400">Failed to load records: {recordsError}</p>
               )}
 
-              {!recordsError && records === null && (
+              {!activeSimilarityQuery && !recordsError && records === null && (
                 <p className="text-sm text-slate-400">Loading records...</p>
               )}
 
-              {!recordsError && records !== null && records.length === 0 && (
-                <p className="text-sm text-slate-400">No records in this collection.</p>
-              )}
+              {!activeSimilarityQuery &&
+                !recordsError &&
+                records !== null &&
+                records.length === 0 && (
+                  <p className="text-sm text-slate-400">No records in this collection.</p>
+                )}
 
-              {!recordsError && records !== null && records.length > 0 && (
+              {!activeSimilarityQuery && !recordsError && records !== null && records.length > 0 && (
                 <div className="flex flex-1 min-h-0 flex-col gap-2">
                   <div className="min-h-0 flex-1 overflow-auto rounded border border-slate-800">
                     <table className="w-full border-collapse text-sm">

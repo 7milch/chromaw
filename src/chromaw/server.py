@@ -18,8 +18,10 @@ from chromaw.errors import (
     CollectionAlreadyExistsError,
     CollectionNotFoundError,
     ConfirmationMismatchError,
+    EmbeddingFunctionUnavailableError,
     InvalidCollectionNameError,
     InvalidFilterError,
+    InvalidQueryEmbeddingError,
     RecordNotFoundError,
 )
 from chromaw.security import SecurityMiddleware, generate_token
@@ -132,6 +134,21 @@ def create_app(
     @app.exception_handler(InvalidCollectionNameError)
     async def _invalid_collection_name_handler(
         _: Request, exc: InvalidCollectionNameError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    @app.exception_handler(EmbeddingFunctionUnavailableError)
+    async def _embedding_function_unavailable_handler(
+        _: Request, exc: EmbeddingFunctionUnavailableError
+    ) -> JSONResponse:
+        # technical-spec §5.6 4: a query_text query that the embedding
+        # function currently can't fulfil (unavailable/failed) is not a
+        # malformed request -- 503, not 422.
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    @app.exception_handler(InvalidQueryEmbeddingError)
+    async def _invalid_query_embedding_handler(
+        _: Request, exc: InvalidQueryEmbeddingError
     ) -> JSONResponse:
         return JSONResponse(status_code=422, content={"detail": str(exc)})
 

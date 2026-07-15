@@ -467,10 +467,10 @@ class ChromaAdapter:
         metadata: dict[str, Any] | None = None,
         uri: str | None = None,
         document: str | None = None,
-        mark_stale: bool = False,
+        embedding_mode: str | None = None,
     ) -> None:
         """Update ``metadata``, ``uri``, and/or ``document`` for a single
-        record (technical-spec §3.3, §5.4, §8.3).
+        record (technical-spec §3.3, §5.4, §8.3, roadmap M3-3).
 
         Only fields explicitly given (non-``None``) are passed to
         ``collection.update()``, so omitting one leaves it untouched in
@@ -479,29 +479,50 @@ class ChromaAdapter:
         ``RecordNotFoundError`` instead of chromadb's update() silently
         no-op'ing (which is chromadb's actual behavior for unknown ids).
 
-        ``document`` is passed straight through to ``collection.update()``.
-        The embedding is deliberately left untouched (technical-spec §3.1,
-        §3.3) -- this method never recomputes the embedding. Note this
-        requires explicitly re-sending the *existing* embedding alongside a
-        changed ``document``: chromadb's ``collection.update()`` otherwise
-        recomputes the embedding itself via the collection's embedding
-        function whenever ``documents`` is given without an explicit
-        ``embeddings`` (observed to raise ``InvalidArgumentError`` for
-        dimension mismatches, or to silently replace the vector when
-        dimensions happen to match) -- exactly the "keep embedding" case
-        this method must support. When ``mark_stale`` is ``True`` (the
-        caller's signal that document was changed with
-        ``embedding_mode="keep"``), ``chromaw_embedding_status: "stale"`` is
-        merged into the metadata sent to ``collection.update()`` -- into the
-        caller-supplied ``metadata`` if given, or as a standalone metadata
-        update otherwise (chromadb's update merges metadata rather than
-        replacing it, so this does not clobber other existing metadata
-        keys).
+        ``embedding_mode`` is only meaningful when ``document`` is also
+        given, and controls what happens to the record's vector
+        (technical-spec §3.3):
+
+        - ``None`` (the default): the embedding is left completely
+          untouched and the record's metadata is not modified beyond
+          whatever ``metadata`` the caller gave -- used internally by tests
+          and by any future caller that doesn't need chromaw's stale-
+          tracking convention.
+        - ``"keep"``: same as ``None`` for the embedding itself, but
+          ``chromaw_embedding_status: "stale"`` is merged into the metadata
+          sent to ``collection.update()`` -- into the caller-supplied
+          ``metadata`` if given, or as a standalone metadata update
+          otherwise (chromadb's update merges metadata rather than
+          replacing it, so this does not clobber other existing metadata
+          keys). This is the mode the API layer uses for
+          ``RecordUpdateRequest(embedding_mode="keep")``.
+        - ``"reembed"``: ``embedding_resolver.embed_document()`` is called
+          *before* ``collection.update()`` (technical-spec §3.1 fail-closed:
+          if embedding fails, nothing is written) to compute a fresh vector
+          for the new ``document``, which is then sent alongside it.
+          ``chromaw_embedding_status`` is set to ``"fresh"`` in the metadata
+          (a sentinel value, not merely omitted -- chromadb's metadata merge
+          has no way to *delete* a key, so a prior ``"stale"`` from an
+          earlier ``"keep"`` edit must be explicitly overwritten to clear
+          it).
+
+        For both ``None`` and ``"keep"``, ``document`` requires explicitly
+        re-sending the record's *existing* embedding alongside the new text:
+        chromadb's ``collection.update()`` otherwise recomputes the
+        embedding itself via the collection's embedding function whenever
+        ``documents`` is given without an explicit ``embeddings`` (observed
+        to raise ``InvalidArgumentError`` for dimension mismatches, or to
+        silently replace the vector when dimensions happen to match) --
+        exactly what "keep/leave untouched" must prevent.
 
         Raises:
             CollectionNotFoundError: no collection named ``name`` exists.
             RecordNotFoundError: no record with id ``record_id`` exists in
                 the collection.
+            EmbeddingFunctionUnavailableError: ``embedding_mode="reembed"``
+                was given but no embedding function is available to compute
+                the new vector (see ``EmbeddingResolver.embed_document``);
+                raised before any write is attempted.
         """
         try:
             collection = self._client.get_collection(name)
@@ -515,10 +536,21 @@ class ChromaAdapter:
                 f"record not found: {record_id!r} in collection {name!r}"
             )
 
+        # Fail closed: compute the new embedding (if requested) before any
+        # write is attempted, so a failure here leaves the record untouched.
+        new_embedding: list[float] | None = None
+        if document is not None and embedding_mode == "reembed":
+            new_embedding = self.embedding_resolver.embed_document(
+                document, collection=collection
+            )
+
         final_metadata = dict(metadata) if metadata is not None else None
-        if mark_stale:
+        if document is not None and embedding_mode == "keep":
             final_metadata = final_metadata or {}
             final_metadata["chromaw_embedding_status"] = "stale"
+        elif document is not None and embedding_mode == "reembed":
+            final_metadata = final_metadata or {}
+            final_metadata["chromaw_embedding_status"] = "fresh"
 
         update_kwargs: dict[str, Any] = {"ids": [record_id]}
         if final_metadata is not None:
@@ -527,12 +559,15 @@ class ChromaAdapter:
             update_kwargs["uris"] = [uri]
         if document is not None:
             update_kwargs["documents"] = [document]
-            existing_embeddings = existing.get("embeddings")
-            if existing_embeddings is not None and len(existing_embeddings) > 0:
-                # Re-send the current embedding explicitly so chromadb does
-                # not recompute it from the new document via the
-                # collection's embedding function (see docstring above).
-                update_kwargs["embeddings"] = [list(existing_embeddings[0])]
+            if embedding_mode == "reembed":
+                update_kwargs["embeddings"] = [new_embedding]
+            else:
+                existing_embeddings = existing.get("embeddings")
+                if existing_embeddings is not None and len(existing_embeddings) > 0:
+                    # Re-send the current embedding explicitly so chromadb
+                    # does not recompute it from the new document via the
+                    # collection's embedding function (see docstring above).
+                    update_kwargs["embeddings"] = [list(existing_embeddings[0])]
 
         collection.update(**update_kwargs)
 

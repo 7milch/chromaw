@@ -77,13 +77,21 @@ def _validate_include(
 
 @router.get("/health", response_model=HealthResponse)
 def get_health(request: Request) -> HealthResponse:
-    """Report server liveness plus the mode/path it was started with."""
+    """Report server liveness plus the mode/path it was started with.
 
+    ``embedding_available`` (M3-3) reflects whether the adapter's
+    ``embedding_resolver`` has an explicit ``--embedding-config``
+    (``EmbeddingResolver.has_explicit_config``) -- see ``HealthResponse``'s
+    docstring for why this is a conservative, not exhaustive, signal.
+    """
+
+    adapter = request.app.state.adapter
     return HealthResponse(
         ok=True,
         version=__version__,
         mode=request.app.state.mode,
         path=str(request.app.state.path),
+        embedding_available=adapter.embedding_resolver.has_explicit_config,
     )
 
 
@@ -127,12 +135,16 @@ def patch_record(
     body: RecordUpdateRequest,
 ) -> RecordInfo:
     """Update ``metadata``, ``uri``, and/or ``document`` for a single record
-    (technical-spec §3.3, §5.4, §8.3).
+    (technical-spec §3.3, §5.4, §8.3, roadmap M3-3).
 
-    ``document`` updates always carry ``embedding_mode="keep"`` (enforced by
-    ``RecordUpdateRequest`` validation), so they are always forwarded with
-    ``mark_stale=True``: the embedding is left untouched and the record's
-    metadata is flagged ``chromaw_embedding_status: "stale"``.
+    ``document`` updates always carry an explicit ``embedding_mode``
+    (enforced by ``RecordUpdateRequest`` validation): ``"keep"`` forwards
+    straight to ``adapter.update_record`` and leaves the vector untouched
+    while flagging the record's metadata ``chromaw_embedding_status:
+    "stale"``; ``"reembed"`` has the adapter compute a fresh vector for the
+    new ``document`` before writing anything (fail-closed --
+    ``EmbeddingFunctionUnavailableError`` propagates as a 503, and in that
+    case nothing about the record has changed).
 
     Before the actual mutation, this is the write-endpoint hook for the
     pre-first-write backup (technical-spec §9.1, roadmap M2-5):
@@ -165,15 +177,15 @@ def patch_record(
         raise RecordNotFoundError(f"record not found: {record_id!r} in collection {name!r}")
     before = before_records[0]
 
-    mark_stale = body.document is not None
     adapter.update_record(
         name,
         record_id,
         metadata=body.metadata,
         uri=body.uri,
         document=body.document,
-        mark_stale=mark_stale,
+        embedding_mode=body.embedding_mode,
     )
+    embedding_stale = body.document is not None and body.embedding_mode == "keep"
 
     records, _, _ = adapter.get_records(
         name,
@@ -197,7 +209,8 @@ def patch_record(
             collection=name,
             record_id=record_id,
             changes=changes,
-            embedding_stale=mark_stale,
+            embedding_stale=embedding_stale,
+            embedding_mode=body.embedding_mode if body.document is not None else None,
         )
 
     return after

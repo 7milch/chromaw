@@ -6,12 +6,23 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class HealthResponse(BaseModel):
-    """Response body for ``GET /api/health``."""
+    """Response body for ``GET /api/health``.
+
+    ``embedding_available`` (M3-3, roadmap "document edit + re-embed") is
+    ``True`` iff an explicit ``--embedding-config`` was given at startup
+    (``EmbeddingResolver.has_explicit_config``); it drives whether the
+    frontend offers a "Re-embed" option for document edits, since without an
+    explicit config chromaw can only opportunistically use a *record's own*
+    collection's embedding function -- unknown to the frontend ahead of a
+    save attempt -- so this flag is a conservative "definitely available"
+    signal rather than an exhaustive one.
+    """
 
     ok: bool
     version: str
     mode: str
     path: str
+    embedding_available: bool = False
 
 
 class CollectionInfo(BaseModel):
@@ -135,18 +146,23 @@ class RecordUpdateRequest(BaseModel):
     """Request body for ``PATCH /api/collections/{name}/records/{id}``
     (technical-spec §5.4, §8.3).
 
-    M2-3 adds ``document`` and ``embedding_mode``. Only ``embedding_mode:
-    "keep"`` is supported in the MVP (technical-spec §3.3); "reembed"/
-    "manual" are deferred to M3. At least one of ``metadata``/``uri``/
-    ``document`` must be given (all ``None`` is rejected with 422, since it
-    would be a no-op PATCH).
+    M2-3 added ``document`` and ``embedding_mode`` with only
+    ``embedding_mode: "keep"`` supported. M3-3 adds ``"reembed"``
+    (technical-spec §3.3 roadmap "document edit + re-embed"): ``"manual"``
+    (caller supplies a precomputed vector) remains deferred. At least one of
+    ``metadata``/``uri``/``document`` must be given (all ``None`` is
+    rejected with 422, since it would be a no-op PATCH).
 
     Since Chroma has no way to recompute the embedding for a changed
     ``document`` without an embedding function configured, chromaw requires
-    the caller to explicitly acknowledge that the embedding will *not* be
-    recomputed by passing ``embedding_mode="keep"`` alongside ``document``;
-    omitting it is rejected with 422 rather than silently leaving document
-    and vector inconsistent.
+    the caller to explicitly choose whether the embedding should be
+    recomputed (``"reembed"``) or intentionally left stale (``"keep"``) by
+    passing ``embedding_mode`` alongside ``document``; omitting it is
+    rejected with 422 rather than silently leaving document and vector
+    inconsistent. A ``"reembed"`` request that can't actually be fulfilled
+    (no embedding function available) is rejected by the API layer with 503
+    rather than a validation error, since it's a runtime/environment
+    condition rather than a malformed request.
 
     chromadb metadata values must be a flat mapping of ``str``/``int``/
     ``float``/``bool`` -- nested dicts/lists and ``None`` values are rejected
@@ -160,7 +176,7 @@ class RecordUpdateRequest(BaseModel):
     metadata: dict | None = None
     uri: str | None = None
     document: str | None = None
-    embedding_mode: Literal["keep"] | None = None
+    embedding_mode: Literal["keep", "reembed"] | None = None
 
     @model_validator(mode="after")
     def _check_at_least_one_field(self) -> "RecordUpdateRequest":
@@ -177,7 +193,7 @@ class RecordUpdateRequest(BaseModel):
                 "embedding_mode must be given when document is updated "
                 "(technical-spec §3.3): document edits do not recompute the "
                 "embedding, so the caller must explicitly acknowledge this by "
-                "passing embedding_mode=\"keep\""
+                "passing embedding_mode=\"keep\" or \"reembed\""
             )
         return self
 

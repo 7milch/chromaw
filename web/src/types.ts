@@ -3,6 +3,7 @@ export interface HealthResponse {
   version: string;
   mode: string;
   path: string;
+  embedding_available: boolean;
 }
 
 export interface CollectionInfo {
@@ -45,7 +46,7 @@ export interface RecordUpdateRequest {
   metadata?: Record<string, unknown> | null;
   uri?: string | null;
   document?: string | null;
-  embedding_mode?: "keep" | null;
+  embedding_mode?: "keep" | "reembed" | null;
 }
 
 export interface RecordDeleteRequest {

@@ -16,6 +16,8 @@ from chromaw.errors import (
 from chromaw.models import (
     BulkDeleteRequest,
     BulkDeleteResponse,
+    BulkPatchRequest,
+    BulkPatchResponse,
     CollectionDeleteRequest,
     CollectionInfo,
     CollectionsResponse,
@@ -365,6 +367,77 @@ def bulk_delete_records(
 
     return BulkDeleteResponse(
         deleted=[record.id for record in deleted_records], skipped=skipped_ids
+    )
+
+
+@router.post(
+    "/collections/{name}/records/bulk-patch",
+    response_model=BulkPatchResponse,
+    dependencies=[Depends(require_write_mode)],
+)
+def bulk_patch_records(
+    name: str,
+    request: Request,
+    body: BulkPatchRequest,
+) -> BulkPatchResponse:
+    """Merge ``metadata`` into multiple records of a collection in one
+    request (technical-spec §3.3, §5.4, §6.5, roadmap M4-4).
+
+    ``body.confirm`` must equal the *collection's* name exactly, same
+    "type the collection name" convention as ``bulk_delete_records`` (a bulk
+    operation has no single natural id to type). The collection's existence
+    is checked first (via ``_find_collection``, 404 if missing) before the
+    ``confirm`` comparison, matching the other bulk/delete endpoints'
+    404-before-409 ordering.
+
+    Requested ids that don't exist are skipped rather than causing the whole
+    request to fail, mirroring ``bulk_delete_records``; the response's
+    ``patched``/``skipped`` lists let the caller reconcile its selection
+    against what really happened. If every requested id turns out to be
+    nonexistent, ``patched`` is simply empty -- still a 200.
+
+    chromadb's ``collection.update()`` *merges* the given metadata into each
+    record's existing metadata rather than replacing it -- an existing
+    metadata key not present in ``body.metadata`` is left untouched, and
+    there is no way to delete a key via this endpoint, only add/overwrite
+    ones.
+
+    Follows the same backup-then-mutate-then-audit sequence as
+    ``bulk_delete_records``; every patched record's before/after metadata is
+    captured and recorded as a single audit entry (``AuditLogger.
+    log_bulk_patch_records``) rather than one entry per record. The audit
+    entry is skipped entirely if nothing was actually patched (all requested
+    ids were nonexistent), consistent with "every write is recorded" -- a
+    request that patched nothing performed no write.
+    """
+
+    backup_manager = request.app.state.backup_manager
+    if backup_manager is not None:
+        backup_manager.ensure_backup()
+
+    _find_collection(request, name)
+
+    if body.confirm != name:
+        raise ConfirmationMismatchError(
+            f"confirm {body.confirm!r} does not match collection name {name!r}"
+        )
+
+    adapter = request.app.state.adapter
+    patched_records, skipped_ids = adapter.bulk_patch_records(name, body.ids, body.metadata)
+
+    audit_logger = request.app.state.audit_logger
+    if audit_logger is not None and patched_records:
+        audit_logger.log_bulk_patch_records(
+            collection=name,
+            patched={
+                before.id: {"before": before.metadata, "after": after.metadata}
+                for before, after in patched_records
+            },
+            skipped=skipped_ids,
+        )
+
+    return BulkPatchResponse(
+        patched=[before.id for before, _ in patched_records], skipped=skipped_ids
     )
 
 

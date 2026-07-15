@@ -672,6 +672,81 @@ class ChromaAdapter:
 
         return existing_records, skipped_ids
 
+    def bulk_patch_records(
+        self, name: str, ids: list[str], metadata: dict[str, Any]
+    ) -> tuple[list[tuple[RecordInfo, RecordInfo]], list[str]]:
+        """Merge ``metadata`` into multiple records of the collection named
+        ``name`` in one call (technical-spec §3.3, §5.4, §6.5, roadmap M4-4).
+
+        Mirrors ``bulk_delete_records``'s existence-checking/de-duplication
+        pattern: ids that exist are captured as full ``RecordInfo``
+        "before" snapshots (document/metadata/uris) and the given
+        ``metadata`` is merged into their metadata via
+        ``collection.update()``; ids that don't exist are skipped rather
+        than raising, so the operation still makes best-effort progress on
+        whichever of the requested ids are actually present. Duplicate ids
+        are de-duplicated first, same as ``bulk_delete_records``.
+
+        ``collection.update()`` merges ``metadata`` into *each* record's own
+        existing metadata (rather than replacing it), so passing the same
+        ``metadata`` dict for every record in the batch is sufficient --
+        there is no need to fetch and hand-merge per record. The full "after"
+        snapshot is re-fetched post-update (rather than computed locally) so
+        the returned/audited values reflect exactly what chromadb now holds.
+
+        Returns a ``(patched_records, skipped_ids)`` tuple: ``patched_records``
+        is a list of ``(before, after)`` ``RecordInfo`` pairs for the ids that
+        were actually updated (in the order given, deduplicated), and
+        ``skipped_ids`` are the requested ids that did not exist in the
+        collection.
+
+        Raises:
+            CollectionNotFoundError: no collection named ``name`` exists.
+        """
+        try:
+            collection = self._client.get_collection(name)
+        except Exception as exc:
+            raise CollectionNotFoundError(f"collection not found: {name}") from exc
+
+        seen: set[str] = set()
+        deduped_ids: list[str] = []
+        for record_id in ids:
+            if record_id not in seen:
+                seen.add(record_id)
+                deduped_ids.append(record_id)
+
+        before_records, _, _ = self.get_records(
+            name,
+            ids=deduped_ids,
+            include=("documents", "metadatas", "uris"),
+        )
+        existing_ids = [record.id for record in before_records]
+        existing_id_set = set(existing_ids)
+        skipped_ids = [rid for rid in deduped_ids if rid not in existing_id_set]
+
+        if not existing_ids:
+            return [], skipped_ids
+
+        collection.update(
+            ids=existing_ids,
+            metadatas=[dict(metadata) for _ in existing_ids],
+        )
+
+        after_records, _, _ = self.get_records(
+            name,
+            ids=existing_ids,
+            include=("documents", "metadatas", "uris"),
+        )
+        after_by_id = {record.id: record for record in after_records}
+
+        patched_records = [
+            (before, after_by_id[before.id])
+            for before in before_records
+            if before.id in after_by_id
+        ]
+
+        return patched_records, skipped_ids
+
     def delete_collection(self, name: str) -> None:
         """Delete the collection named ``name`` in its entirety
         (technical-spec §3.2, §5.2, §6.5, roadmap M2-7).

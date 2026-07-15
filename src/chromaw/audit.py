@@ -132,6 +132,43 @@ class AuditLogger:
         }
         self._append(entry)
 
+    def log_bulk_patch_records(
+        self,
+        *,
+        collection: str,
+        patched: dict[str, dict[str, Any]],
+        skipped: list[str],
+    ) -> None:
+        """Append a single ``record.bulk_patch`` entry for a bulk metadata
+        patch operation (roadmap M4-4).
+
+        ``patched`` maps each actually-updated record id to
+        ``{"before": ..., "after": ...}`` metadata (mirrors ``log_update``'s
+        per-field before/after shape, restricted to ``metadata`` since bulk
+        patch only ever touches that field). Same truncation convention as
+        ``log_import``: only the first ``_MAX_LOGGED_SKIPPED`` (50) of
+        ``patched``/``skipped`` are written to the audit line, with the full
+        counts recorded separately as ``patched_total``/``skipped_total`` so
+        a very large bulk patch can't blow up ``audit.jsonl``; the API
+        response to the caller is unaffected by this truncation. All records
+        touched by one bulk operation are recorded as a single JSONL line
+        (rather than one line per record), same as
+        ``log_bulk_delete_records``, since this is one user action.
+        """
+
+        patched_items = list(patched.items())
+        entry = {
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "operation": "record.bulk_patch",
+            "collection": collection,
+            "patched": dict(patched_items[:_MAX_LOGGED_SKIPPED]),
+            "patched_total": len(patched_items),
+            "skipped": skipped[:_MAX_LOGGED_SKIPPED],
+            "skipped_total": len(skipped),
+            "user_agent": f"chromaw/{__version__}",
+        }
+        self._append(entry)
+
     def log_delete_collection(
         self,
         *,

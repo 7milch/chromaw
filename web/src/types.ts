@@ -67,6 +67,17 @@ export interface BulkDeleteResponse {
   skipped: string[];
 }
 
+export interface BulkPatchRequest {
+  ids: string[];
+  metadata: Record<string, unknown>;
+  confirm: string;
+}
+
+export interface BulkPatchResponse {
+  patched: string[];
+  skipped: string[];
+}
+
 export interface CollectionUpdateRequest {
   name?: string;
   metadata?: Record<string, unknown>;

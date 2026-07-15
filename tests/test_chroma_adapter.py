@@ -10,8 +10,10 @@ from chromaw.errors import (
     ChromaPathNotFoundError,
     CollectionAlreadyExistsError,
     CollectionNotFoundError,
+    EmbeddingFunctionUnavailableError,
     InvalidCollectionNameError,
     InvalidFilterError,
+    InvalidQueryEmbeddingError,
     RecordNotFoundError,
 )
 
@@ -1014,3 +1016,216 @@ def test_update_collection_rename_persists_across_adapter_instances(tmp_path: Pa
     adapter2 = ChromaAdapter.open(tmp_path)
     names = [c.name for c in adapter2.list_collections()]
     assert names == ["bar"]
+
+
+# ---------------------------------------------------------------------------
+# query_records (technical-spec §5.6 4, §8.4, roadmap M3-1)
+#
+# These tests exercise the query_embeddings path exclusively: embeddings are
+# supplied explicitly to collection.add()/query() so no embedding function
+# (and therefore no model download / network access) is ever invoked. The
+# query_text path is only exercised for its error handling (mocked, below);
+# a happy-path query_text test would require chromadb's default embedding
+# function to download the all-MiniLM-L6-v2 model, which is not viable in a
+# network-free test environment.
+# ---------------------------------------------------------------------------
+
+
+def _make_query_collection(tmp_path: Path):
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["near", "mid", "far"],
+        documents=["doc-near", "doc-mid", "doc-far"],
+        metadatas=[{"idx": 0}, {"idx": 1}, {"idx": 2}],
+        embeddings=[[0.0, 0.0], [1.0, 0.0], [10.0, 0.0]],
+    )
+    return collection
+
+
+def test_query_records_orders_by_distance(tmp_path: Path) -> None:
+    _make_query_collection(tmp_path)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    matches = adapter.query_records("foo", query_embedding=[0.0, 0.0], n_results=3)
+
+    assert [m.id for m in matches] == ["near", "mid", "far"]
+    assert matches[0].distance == 0.0
+    assert matches[1].distance < matches[2].distance
+
+
+def test_query_records_n_results_limits_matches(tmp_path: Path) -> None:
+    _make_query_collection(tmp_path)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    matches = adapter.query_records("foo", query_embedding=[0.0, 0.0], n_results=1)
+
+    assert len(matches) == 1
+    assert matches[0].id == "near"
+
+
+def test_query_records_include_controls_fields(tmp_path: Path) -> None:
+    _make_query_collection(tmp_path)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    matches = adapter.query_records(
+        "foo",
+        query_embedding=[0.0, 0.0],
+        n_results=3,
+        include=("documents", "metadatas", "uris", "distances", "embeddings"),
+    )
+
+    by_id = {m.id: m for m in matches}
+    assert by_id["near"].document == "doc-near"
+    assert by_id["near"].metadata == {"idx": 0}
+    assert by_id["near"].embedding_dimension == 2
+    assert by_id["near"].embedding_preview == [0.0, 0.0]
+
+
+def test_query_records_where_narrows_candidates(tmp_path: Path) -> None:
+    _make_query_collection(tmp_path)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    matches = adapter.query_records(
+        "foo", query_embedding=[0.0, 0.0], n_results=3, where={"idx": 2}
+    )
+
+    assert [m.id for m in matches] == ["far"]
+
+
+def test_query_records_where_document_narrows_candidates(tmp_path: Path) -> None:
+    _make_query_collection(tmp_path)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    matches = adapter.query_records(
+        "foo",
+        query_embedding=[0.0, 0.0],
+        n_results=3,
+        where_document={"$contains": "mid"},
+    )
+
+    assert [m.id for m in matches] == ["mid"]
+
+
+def test_query_records_invalid_where_raises_invalid_filter_error(tmp_path: Path) -> None:
+    _make_query_collection(tmp_path)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    with pytest.raises(InvalidFilterError):
+        adapter.query_records(
+            "foo", query_embedding=[0.0, 0.0], where={"idx": {"$bogus": 1}}
+        )
+
+
+def test_query_records_wrong_dimension_embedding_raises_invalid_query_embedding(
+    tmp_path: Path,
+) -> None:
+    _make_query_collection(tmp_path)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    with pytest.raises(InvalidQueryEmbeddingError):
+        adapter.query_records("foo", query_embedding=[0.0, 0.0, 0.0])
+
+
+def test_query_records_nonexistent_collection_raises(tmp_path: Path) -> None:
+    chromadb.PersistentClient(path=str(tmp_path))
+    adapter = ChromaAdapter.open(tmp_path)
+
+    with pytest.raises(CollectionNotFoundError):
+        adapter.query_records("does-not-exist", query_embedding=[0.0, 0.0])
+
+
+def test_query_records_query_text_embedding_function_failure_raises(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """query_text delegates embedding to the collection's embedding
+    function; a failure there (e.g. unavailable, can't load the model) must
+    surface as EmbeddingFunctionUnavailableError rather than
+    InvalidQueryEmbeddingError. The underlying chromadb call is mocked here
+    to simulate that failure without requiring network access."""
+    _make_query_collection(tmp_path)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    collection = adapter._client.get_collection("foo")
+
+    def _boom(**kwargs):
+        raise ValueError("embedding function unavailable")
+
+    monkeypatch.setattr(collection, "query", _boom)
+    monkeypatch.setattr(adapter._client, "get_collection", lambda name: collection)
+
+    with pytest.raises(EmbeddingFunctionUnavailableError):
+        adapter.query_records("foo", query_text="hello")
+
+
+def test_query_records_n_results_exceeds_collection_size_returns_all(
+    tmp_path: Path,
+) -> None:
+    """n_results larger than the collection's total record count should not
+    error -- chromadb simply returns as many matches as exist."""
+    _make_query_collection(tmp_path)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    matches = adapter.query_records("foo", query_embedding=[0.0, 0.0], n_results=500)
+
+    assert len(matches) == 3
+    assert [m.id for m in matches] == ["near", "mid", "far"]
+
+
+def test_query_records_empty_collection_returns_no_matches(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    client.create_collection("empty")
+    adapter = ChromaAdapter.open(tmp_path)
+
+    matches = adapter.query_records("empty", query_embedding=[0.0, 0.0], n_results=5)
+
+    assert matches == []
+
+
+def test_query_records_where_yields_zero_matches(tmp_path: Path) -> None:
+    """A well-formed where filter that matches nothing returns an empty
+    match list, not an error."""
+    _make_query_collection(tmp_path)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    matches = adapter.query_records(
+        "foo", query_embedding=[0.0, 0.0], n_results=3, where={"idx": 999}
+    )
+
+    assert matches == []
+
+
+def test_query_records_zero_vector_embedding_succeeds(tmp_path: Path) -> None:
+    """An all-zero query_embedding is a valid (if degenerate) vector -- it
+    must not be rejected, and should still return distance-ordered
+    matches."""
+    _make_query_collection(tmp_path)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    matches = adapter.query_records("foo", query_embedding=[0.0, 0.0], n_results=3)
+
+    assert [m.id for m in matches] == ["near", "mid", "far"]
+    assert matches[0].distance == 0.0
+
+
+def test_query_records_embeddings_excluded_from_include_leaves_fields_none(
+    tmp_path: Path,
+) -> None:
+    """When "embeddings" is absent from include, embedding_dimension and
+    embedding_preview must stay None even though other embedding-adjacent
+    fields (distances) are populated."""
+    _make_query_collection(tmp_path)
+    adapter = ChromaAdapter.open(tmp_path)
+
+    matches = adapter.query_records(
+        "foo",
+        query_embedding=[0.0, 0.0],
+        n_results=3,
+        include=("documents", "distances"),
+    )
+
+    assert len(matches) == 3
+    for m in matches:
+        assert m.embedding_dimension is None
+        assert m.embedding_preview is None
+        assert m.distance is not None

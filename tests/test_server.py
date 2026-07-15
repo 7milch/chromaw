@@ -2147,3 +2147,349 @@ def test_delete_collection_with_japanese_metadata_writes_audit_entry(
     assert entry["operation"] == "collection.delete"
     assert entry["collection"] == "foo"
     assert entry["before"]["metadata"]["名前"] == "日本語の値"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/collections/{name}/query (technical-spec §5.6 4, §8.4, roadmap
+# M3-1)
+#
+# Same network-free constraint as tests/test_chroma_adapter.py's
+# query_records tests: query_embedding is exercised for the happy paths
+# (embeddings supplied explicitly, no embedding function ever invoked);
+# query_text is only exercised via its 422 (mutual-exclusivity) and mocked
+# 503 (embedding function failure) error paths.
+# ---------------------------------------------------------------------------
+
+
+def _add_query_records(tmp_path: Path):
+    import chromadb
+
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client_lib.create_collection("foo")
+    collection.add(
+        ids=["near", "mid", "far"],
+        documents=["doc-near", "doc-mid", "doc-far"],
+        metadatas=[{"idx": 0}, {"idx": 1}, {"idx": 2}],
+        embeddings=[[0.0, 0.0], [1.0, 0.0], [10.0, 0.0]],
+    )
+    return collection
+
+
+def test_query_orders_matches_by_distance(tmp_path: Path, make_app, make_client) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query", json={"query_embedding": [0.0, 0.0]}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [m["id"] for m in body["matches"]] == ["near", "mid", "far"]
+    assert body["matches"][0]["distance"] == 0.0
+
+
+def test_query_n_results_limits_matches(tmp_path: Path, make_app, make_client) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query",
+        json={"query_embedding": [0.0, 0.0], "n_results": 2},
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["matches"]) == 2
+
+
+def test_query_where_narrows_matches(tmp_path: Path, make_app, make_client) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query",
+        json={"query_embedding": [0.0, 0.0], "where": {"idx": 2}},
+    )
+
+    assert response.status_code == 200
+    assert [m["id"] for m in response.json()["matches"]] == ["far"]
+
+
+def test_query_include_documents_metadatas(tmp_path: Path, make_app, make_client) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query",
+        json={
+            "query_embedding": [0.0, 0.0],
+            "include": ["documents", "metadatas", "distances"],
+        },
+    )
+
+    assert response.status_code == 200
+    match = response.json()["matches"][0]
+    assert match["document"] == "doc-near"
+    assert match["metadata"] == {"idx": 0}
+
+
+def test_query_nonexistent_collection_returns_404(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/does-not-exist/query", json={"query_embedding": [0.0, 0.0]}
+    )
+
+    assert response.status_code == 404
+
+
+def test_query_requires_token(tmp_path: Path, make_app, make_client) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app, token=None)
+
+    response = client.post(
+        "/api/collections/foo/query", json={"query_embedding": [0.0, 0.0]}
+    )
+
+    assert response.status_code == 401
+
+
+def test_query_available_in_read_only_mode(tmp_path: Path, make_app, make_client) -> None:
+    """Similarity search is a read operation, so it must not be gated by
+    require_write_mode (technical-spec §3.2 -- only mutations require
+    --write)."""
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path, write=False)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query", json={"query_embedding": [0.0, 0.0]}
+    )
+
+    assert response.status_code == 200
+
+
+def test_query_invalid_include_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query",
+        json={"query_embedding": [0.0, 0.0], "include": ["bogus"]},
+    )
+
+    assert response.status_code == 422
+
+
+def test_query_wrong_dimension_embedding_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query",
+        json={"query_embedding": [0.0, 0.0, 0.0]},
+    )
+
+    assert response.status_code == 422
+
+
+def test_query_invalid_where_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query",
+        json={"query_embedding": [0.0, 0.0], "where": {"idx": {"$bogus": 1}}},
+    )
+
+    assert response.status_code == 422
+
+
+def test_query_neither_text_nor_embedding_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post("/api/collections/foo/query", json={})
+
+    assert response.status_code == 422
+
+
+def test_query_both_text_and_embedding_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query",
+        json={"query_text": "hello", "query_embedding": [0.0, 0.0]},
+    )
+
+    assert response.status_code == 422
+
+
+def test_query_empty_query_embedding_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query", json={"query_embedding": []}
+    )
+
+    assert response.status_code == 422
+
+
+def test_query_n_results_zero_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query",
+        json={"query_embedding": [0.0, 0.0], "n_results": 0},
+    )
+
+    assert response.status_code == 422
+
+
+def test_query_text_embedding_function_failure_returns_503(
+    tmp_path: Path, make_app, make_client, monkeypatch
+) -> None:
+    """query_text delegates to the collection's embedding function; a
+    failure there (e.g. unavailable, can't load the model) must surface as
+    503, not a generic 500 or 422. The chromadb call is mocked here to
+    simulate that failure without requiring network access to actually
+    download an embedding model."""
+    collection = _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    adapter = app.state.adapter
+
+    def _boom(**kwargs):
+        raise ValueError("embedding function unavailable")
+
+    monkeypatch.setattr(collection, "query", _boom)
+    monkeypatch.setattr(adapter._client, "get_collection", lambda name: collection)
+
+    response = client.post(
+        "/api/collections/foo/query", json={"query_text": "hello"}
+    )
+
+    assert response.status_code == 503
+
+
+def test_query_n_results_500_boundary_accepted(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query",
+        json={"query_embedding": [0.0, 0.0], "n_results": 500},
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["matches"]) == 3
+
+
+def test_query_n_results_501_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query",
+        json={"query_embedding": [0.0, 0.0], "n_results": 501},
+    )
+
+    assert response.status_code == 422
+
+
+def test_query_empty_collection_returns_empty_matches(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    import chromadb
+
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("empty")
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/empty/query", json={"query_embedding": [0.0, 0.0]}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["matches"] == []
+
+
+def test_query_where_zero_matches_returns_empty_list(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query",
+        json={"query_embedding": [0.0, 0.0], "where": {"idx": 999}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["matches"] == []
+
+
+def test_query_zero_vector_embedding_accepted(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query", json={"query_embedding": [0.0, 0.0]}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["matches"][0]["distance"] == 0.0
+
+
+def test_query_include_without_embeddings_leaves_embedding_fields_null(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_query_records(tmp_path)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/query",
+        json={"query_embedding": [0.0, 0.0], "include": ["documents", "distances"]},
+    )
+
+    assert response.status_code == 200
+    for match in response.json()["matches"]:
+        assert match["embedding_dimension"] is None
+        assert match["embedding_preview"] is None

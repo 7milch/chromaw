@@ -8,6 +8,7 @@ import {
 } from "./export";
 import { downloadCollectionJsonl, importCollectionJsonl } from "./jsonl";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
+import BulkPatchModal from "./BulkPatchModal";
 import ConfirmNameModal from "./ConfirmNameModal";
 import DocumentEditor, { type DocumentEditorHandle } from "./DocumentEditor";
 import MetadataEditor, { type MetadataEditorHandle } from "./MetadataEditor";
@@ -15,6 +16,7 @@ import RenameCollectionModal from "./RenameCollectionModal";
 import ShortcutsHelpModal from "./ShortcutsHelpModal";
 import type {
   BulkDeleteResponse,
+  BulkPatchResponse,
   CollectionInfo,
   CollectionsResponse,
   ImportResponse,
@@ -172,6 +174,16 @@ function App() {
   // to the user after the modal closes.
   const [bulkDeleteModalOpen, setBulkDeleteModalOpen] = useState(false);
   const [bulkDeleteResult, setBulkDeleteResult] = useState<BulkDeleteResponse | null>(
+    null
+  );
+
+  // Bulk metadata patch of the current multi-selection (M4-4, technical-spec
+  // §3.3, §5.4, §6.5): same "type the collection name" confirmation as bulk
+  // delete, surfaced via BulkPatchModal. ``bulkPatchResult`` holds the last
+  // response's patched/skipped counts so they can be surfaced after the
+  // modal closes.
+  const [bulkPatchModalOpen, setBulkPatchModalOpen] = useState(false);
+  const [bulkPatchResult, setBulkPatchResult] = useState<BulkPatchResponse | null>(
     null
   );
 
@@ -435,7 +447,8 @@ function App() {
     deleteRecordModalOpen ||
     deleteCollectionModalOpen ||
     renameCollectionModalOpen ||
-    bulkDeleteModalOpen;
+    bulkDeleteModalOpen ||
+    bulkPatchModalOpen;
 
   useKeyboardShortcuts({
     searchInputRef,
@@ -737,6 +750,29 @@ function App() {
     setCollectionsRefreshTick((t) => t + 1);
   }
 
+  async function bulkPatchSelected(metadata: Record<string, unknown>) {
+    if (!selectedName || selectedIds.size === 0) return;
+    const res = await apiFetch(
+      `/api/collections/${encodeURIComponent(selectedName)}/records/bulk-patch`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ids: Array.from(selectedIds),
+          metadata,
+          confirm: selectedName,
+        }),
+      }
+    );
+    await throwOnError(res);
+    const result = (await res.json()) as BulkPatchResponse;
+    setBulkPatchResult(result);
+    setBulkPatchModalOpen(false);
+    setSelectedIds(new Set());
+    setRecordsRefreshTick((t) => t + 1);
+    setRefreshTick((t) => t + 1);
+  }
+
   async function renameCollection(newName: string) {
     if (!selectedName) return;
     const res = await apiFetch(`/api/collections/${encodeURIComponent(selectedName)}`, {
@@ -878,6 +914,18 @@ function App() {
                           <button
                             type="button"
                             onClick={() => {
+                              setBulkPatchResult(null);
+                              setBulkPatchModalOpen(true);
+                            }}
+                            className="rounded border border-slate-700 px-2 py-1 text-xs hover:bg-slate-800"
+                          >
+                            {`Edit metadata (${selectedIds.size})`}
+                          </button>
+                        )}
+                        {isWriteMode && (
+                          <button
+                            type="button"
+                            onClick={() => {
                               setBulkDeleteResult(null);
                               setBulkDeleteModalOpen(true);
                             }}
@@ -997,6 +1045,16 @@ function App() {
                     {bulkDeleteResult.deleted.length === 1 ? "" : "s"}
                     {bulkDeleteResult.skipped.length > 0
                       ? ` (${bulkDeleteResult.skipped.length} already gone, skipped)`
+                      : ""}
+                    .
+                  </p>
+                )}
+                {bulkPatchResult && (
+                  <p className="border-t border-slate-800 px-3 py-1 text-xs text-slate-400">
+                    Patched {bulkPatchResult.patched.length} record
+                    {bulkPatchResult.patched.length === 1 ? "" : "s"}
+                    {bulkPatchResult.skipped.length > 0
+                      ? ` (${bulkPatchResult.skipped.length} no longer present, skipped)`
                       : ""}
                     .
                   </p>
@@ -1473,6 +1531,15 @@ function App() {
           confirmLabel="Delete"
           onConfirm={bulkDeleteSelected}
           onCancel={() => setBulkDeleteModalOpen(false)}
+        />
+      )}
+
+      {bulkPatchModalOpen && selectedName && (
+        <BulkPatchModal
+          selectedCount={selectedIds.size}
+          collectionName={selectedName}
+          onConfirm={bulkPatchSelected}
+          onCancel={() => setBulkPatchModalOpen(false)}
         />
       )}
 

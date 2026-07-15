@@ -2707,6 +2707,442 @@ def test_bulk_delete_confirm_from_different_collection_returns_409(
     assert len(remaining) == 2
 
 
+# --- POST .../records/bulk-patch (roadmap M4-4) ---
+
+
+def test_bulk_patch_confirm_match_merges_metadata(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 3)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["0", "1"], "metadata": {"tag": "x"}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert sorted(body["patched"]) == ["0", "1"]
+    assert body["skipped"] == []
+
+    records = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    by_id = {r["id"]: r for r in records}
+    assert by_id["0"]["metadata"] == {"idx": 0, "tag": "x"}
+    assert by_id["1"]["metadata"] == {"idx": 1, "tag": "x"}
+    assert by_id["2"]["metadata"] == {"idx": 2}
+
+
+def test_bulk_patch_overwrites_existing_key_keeps_others(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["0"], "metadata": {"idx": 99, "extra": "y"}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    records = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert records[0]["metadata"] == {"idx": 99, "extra": "y"}
+
+
+def test_bulk_patch_confirm_mismatch_returns_409(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 2)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["0"], "metadata": {"tag": "x"}, "confirm": "wrong"},
+    )
+
+    assert response.status_code == 409
+    records = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert records[0]["metadata"] == {"idx": 0}
+
+
+def test_bulk_patch_partial_existing_ids_patches_existing_and_reports_skipped(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 2)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["0", "missing-1", "missing-2"], "metadata": {"tag": "x"}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["patched"] == ["0"]
+    assert sorted(body["skipped"]) == ["missing-1", "missing-2"]
+
+
+def test_bulk_patch_all_ids_nonexistent_returns_200_with_empty_patched(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["missing"], "metadata": {"tag": "x"}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["patched"] == []
+    assert body["skipped"] == ["missing"]
+
+
+def test_bulk_patch_nonexistent_collection_returns_404(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/missing/records/bulk-patch",
+        json={"ids": ["0"], "metadata": {"tag": "x"}, "confirm": "missing"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_bulk_patch_read_only_returns_403(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=False)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["0"], "metadata": {"tag": "x"}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_bulk_patch_without_token_returns_401(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app, token=None)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["0"], "metadata": {"tag": "x"}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_bulk_patch_empty_ids_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": [], "metadata": {"tag": "x"}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_bulk_patch_empty_metadata_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["0"], "metadata": {}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_bulk_patch_invalid_metadata_type_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["0"], "metadata": {"tag": {"nested": True}}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_bulk_patch_duplicate_ids_patches_once(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 2)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["0", "0"], "metadata": {"tag": "x"}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["patched"] == ["0"]
+
+
+def test_bulk_patch_writes_single_audit_entry_with_before_after(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 3)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["0", "1", "missing"], "metadata": {"tag": "x"}, "confirm": "foo"},
+    )
+
+    audit_path = tmp_path / ".chromaw" / "audit.jsonl"
+    lines = audit_path.read_text().strip().splitlines()
+    entry = json.loads(lines[-1])
+    assert entry["operation"] == "record.bulk_patch"
+    assert entry["collection"] == "foo"
+    assert sorted(entry["patched"].keys()) == ["0", "1"]
+    assert entry["patched"]["0"]["before"] == {"idx": 0}
+    assert entry["patched"]["0"]["after"] == {"idx": 0, "tag": "x"}
+    assert entry["patched"]["1"]["before"] == {"idx": 1}
+    assert entry["patched"]["1"]["after"] == {"idx": 1, "tag": "x"}
+    assert entry["skipped"] == ["missing"]
+    assert entry["patched_total"] == 2
+    assert entry["skipped_total"] == 1
+
+
+def test_bulk_patch_all_ids_nonexistent_writes_no_audit_entry(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["missing"], "metadata": {"tag": "x"}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    audit_path = tmp_path / ".chromaw" / "audit.jsonl"
+    assert not audit_path.exists()
+
+
+def test_bulk_patch_audit_truncates_at_50_patched_and_skipped(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """A bulk patch touching 51 existing ids plus 51 missing ids should still
+    write a single audit entry, but only the first 50 of each of
+    ``patched``/``skipped`` -- with the full counts recorded separately as
+    ``patched_total``/``skipped_total`` (mirrors ``log_import``'s skip
+    truncation, roadmap M4-3)."""
+    _add_records(tmp_path, "foo", 51)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    existing_ids = [str(i) for i in range(51)]
+    missing_ids = [f"missing-{i}" for i in range(51)]
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": existing_ids + missing_ids, "metadata": {"tag": "x"}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert sorted(body["patched"], key=int) == existing_ids
+    assert sorted(body["skipped"]) == sorted(missing_ids)
+
+    audit_path = tmp_path / ".chromaw" / "audit.jsonl"
+    lines = audit_path.read_text().strip().splitlines()
+    entry = json.loads(lines[-1])
+    assert entry["operation"] == "record.bulk_patch"
+    assert len(entry["patched"]) == 50
+    assert entry["patched_total"] == 51
+    assert len(entry["skipped"]) == 50
+    assert entry["skipped_total"] == 51
+
+
+def test_bulk_patch_confirm_from_different_collection_returns_409(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 2)
+    _add_records(tmp_path, "bar", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["0"], "metadata": {"tag": "x"}, "confirm": "bar"},
+    )
+
+    assert response.status_code == 409
+
+
+def test_bulk_patch_can_overwrite_embedding_status_metadata_key(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """Bulk patch has no key-exclusion list, so it can silently overwrite
+    the internal ``chromaw_embedding_status`` bookkeeping key -- flagging
+    this as a real edge case (not asserting it should be blocked, since
+    that's a product decision): a record marked ``stale`` after a
+    keep-mode document edit can be forced back to ``fresh`` via bulk patch
+    without ever having been re-embedded, silently defeating the
+    stale/fresh integrity guarantee described in CLAUDE.md."""
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    # Simulate a record already marked stale by a prior keep-mode edit.
+    client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={
+            "ids": ["0"],
+            "metadata": {"chromaw_embedding_status": "stale"},
+            "confirm": "foo",
+        },
+    )
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={
+            "ids": ["0"],
+            "metadata": {"chromaw_embedding_status": "fresh"},
+            "confirm": "foo",
+        },
+    )
+
+    assert response.status_code == 200
+    records = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert records[0]["metadata"]["chromaw_embedding_status"] == "fresh"
+
+
+def test_bulk_patch_record_with_none_metadata(tmp_path: Path, make_app, make_client) -> None:
+    """A record whose metadata is ``None`` in chromadb (no metadata ever
+    set) should still be patchable -- ``collection.update()`` merging into
+    ``None`` should behave like merging into ``{}``."""
+    import chromadb
+
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client_lib.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]])  # no metadata at all
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["1"], "metadata": {"tag": "x"}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["patched"] == ["1"]
+    records = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert records[0]["metadata"] == {"tag": "x"}
+
+
+def test_bulk_patch_japanese_keys_and_values(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["0"], "metadata": {"タグ": "日本語の値"}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    records = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert records[0]["metadata"]["タグ"] == "日本語の値"
+
+
+def test_bulk_patch_bool_value_preserved_not_cast_to_int(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """``isinstance(value, bool)`` must be checked before the int/float
+    branch so that a JSON ``true``/``false`` doesn't get silently coerced to
+    ``1``/``0`` and stored as an int in chromadb metadata."""
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["0"], "metadata": {"flag": True}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    records = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert records[0]["metadata"]["flag"] is True
+
+
+def test_bulk_patch_null_metadata_value_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ["0"], "metadata": {"tag": None}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_bulk_patch_1000_records(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1000)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    ids = [str(i) for i in range(1000)]
+    response = client.post(
+        "/api/collections/foo/records/bulk-patch",
+        json={"ids": ids, "metadata": {"tag": "bulk"}, "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["patched"]) == 1000
+    assert body["skipped"] == []
+
+    audit_path = tmp_path / ".chromaw" / "audit.jsonl"
+    lines = audit_path.read_text().strip().splitlines()
+    entry = json.loads(lines[-1])
+    assert entry["patched_total"] == 1000
+    assert len(entry["patched"]) == 50
+    assert entry["skipped_total"] == 0
+
+
 # ---------------------------------------------------------------------------
 # POST /api/collections/{name}/query (technical-spec §5.6 4, §8.4, roadmap
 # M3-1)

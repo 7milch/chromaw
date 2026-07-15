@@ -1212,6 +1212,86 @@ def test_bulk_delete_records_nonexistent_collection_raises(tmp_path: Path) -> No
         adapter.bulk_delete_records("missing", ["1"])
 
 
+# --- bulk_patch_records (roadmap M4-4) ---
+
+
+def test_bulk_patch_records_merges_metadata_and_skips_missing(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1", "2", "3"],
+        embeddings=[[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]],
+        metadatas=[{"idx": 1, "keep": "a"}, {"idx": 2, "keep": "b"}, {"idx": 3}],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    patched, skipped = adapter.bulk_patch_records("foo", ["1", "2", "missing"], {"tag": "x"})
+
+    assert sorted(before.id for before, _ in patched) == ["1", "2"]
+    assert skipped == ["missing"]
+
+    by_id = {before.id: (before, after) for before, after in patched}
+    before1, after1 = by_id["1"]
+    assert before1.metadata == {"idx": 1, "keep": "a"}
+    assert after1.metadata == {"idx": 1, "keep": "a", "tag": "x"}
+    before2, after2 = by_id["2"]
+    assert before2.metadata == {"idx": 2, "keep": "b"}
+    assert after2.metadata == {"idx": 2, "keep": "b", "tag": "x"}
+
+    records, _, _ = adapter.get_records("foo")
+    unaffected = next(r for r in records if r.id == "3")
+    assert unaffected.metadata == {"idx": 3}
+
+
+def test_bulk_patch_records_overwrites_existing_key(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], metadatas=[{"tag": "old"}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    patched, skipped = adapter.bulk_patch_records("foo", ["1"], {"tag": "new"})
+
+    assert skipped == []
+    _, after = patched[0]
+    assert after.metadata == {"tag": "new"}
+
+
+def test_bulk_patch_records_all_missing_patches_nothing(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], metadatas=[{"idx": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    patched, skipped = adapter.bulk_patch_records("foo", ["missing"], {"tag": "x"})
+
+    assert patched == []
+    assert skipped == ["missing"]
+
+    records, _, _ = adapter.get_records("foo")
+    assert records[0].metadata == {"idx": 1}
+
+
+def test_bulk_patch_records_duplicate_ids_patches_once(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1", "2"], embeddings=[[0.1, 0.2], [0.3, 0.4]], metadatas=[{"a": 1}, {"a": 2}]
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    patched, skipped = adapter.bulk_patch_records("foo", ["1", "1"], {"tag": "x"})
+
+    assert [before.id for before, _ in patched] == ["1"]
+    assert skipped == []
+
+
+def test_bulk_patch_records_nonexistent_collection_raises(tmp_path: Path) -> None:
+    adapter = ChromaAdapter.open(tmp_path, create=True)
+
+    with pytest.raises(CollectionNotFoundError):
+        adapter.bulk_patch_records("missing", ["1"], {"tag": "x"})
+
+
 def test_delete_collection_removes_collection(tmp_path: Path) -> None:
     client = chromadb.PersistentClient(path=str(tmp_path))
     client.create_collection("foo")

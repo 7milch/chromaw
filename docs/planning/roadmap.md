@@ -53,7 +53,7 @@
 - [x] M4-1: selected export (Issue #27)
 - [x] M4-2: bulk delete（advanced + 確認フロー） (Issue #28)
 - [x] M4-3: JSONL import / export (Issue #29)
-- [ ] M4-4: bulk metadata patch
+- [x] M4-4: bulk metadata patch (Issue #30)
 - [ ] M4-5: Playwright UI テスト
 
 ## Release

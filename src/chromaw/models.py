@@ -256,6 +256,63 @@ class BulkDeleteResponse(BaseModel):
     skipped: list[str]
 
 
+class BulkPatchRequest(BaseModel):
+    """Request body for ``POST /api/collections/{name}/records/bulk-patch``
+    (technical-spec §3.3, §5.4, §6.5, roadmap M4-4).
+
+    Bulk metadata edits are not currently as destructive as bulk delete
+    (nothing is removed), but they still write to potentially many records
+    at once with no per-record confirmation step, so ``confirm`` is still
+    required -- checked against the *collection's* name, same convention as
+    ``BulkDeleteRequest``. ``ids`` must be non-empty (422 otherwise);
+    duplicates are tolerated (the adapter de-duplicates internally, same as
+    ``BulkDeleteRequest``).
+
+    ``metadata`` uses the same flat-scalar-dict validation as
+    ``RecordUpdateRequest.metadata`` (non-empty; each value a str/int/float/
+    bool). Unlike a single-record PATCH, bulk patch only supports metadata
+    (no ``document``/``uri``/``embedding_mode``) -- keeping bulk operations
+    to the one field that's safe to apply uniformly across many records at
+    once. chromadb's ``collection.update()`` *merges* the given metadata
+    into each record's existing metadata rather than replacing it (same
+    semantics as the single-record PATCH), so this cannot be used to delete
+    an existing metadata key -- only add new ones or overwrite existing
+    ones.
+    """
+
+    ids: list[str] = Field(min_length=1)
+    metadata: dict
+    confirm: str
+
+    @model_validator(mode="after")
+    def _check_metadata_is_flat_scalar_dict(self) -> "BulkPatchRequest":
+        if not self.metadata:
+            raise ValueError("metadata must be a non-empty mapping")
+        for key, value in self.metadata.items():
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (str, int, float)):
+                continue
+            raise ValueError(
+                f"metadata value for key {key!r} must be a str, int, float, "
+                f"or bool (got {type(value).__name__})"
+            )
+        return self
+
+
+class BulkPatchResponse(BaseModel):
+    """Response body for ``POST /api/collections/{name}/records/bulk-patch``.
+
+    ``patched`` lists the ids that actually existed and had ``metadata``
+    merged into them; ``skipped`` lists the requested ids that did not exist
+    in the collection (and were therefore left untouched), same
+    reconciliation contract as ``BulkDeleteResponse``.
+    """
+
+    patched: list[str]
+    skipped: list[str]
+
+
 class CollectionDeleteRequest(BaseModel):
     """Request body for ``DELETE /api/collections/{name}`` (technical-spec
     §3.2, §5.2, §6.5, roadmap M2-7).

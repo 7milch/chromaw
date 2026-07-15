@@ -218,7 +218,7 @@ function MetadataEditor(
   const hasRemovedKeys = diffEntries.some((entry) => entry.kind === "removed");
 
   return (
-    <div>
+    <div data-testid="metadata-editor">
       <div className="mb-1 flex items-center justify-between">
         <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
           metadata

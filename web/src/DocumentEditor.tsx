@@ -130,7 +130,7 @@ function DocumentEditor(
   const lengthDelta = afterLength - beforeLength;
 
   return (
-    <div>
+    <div data-testid="document-editor">
       <div className="mb-1 flex items-center justify-between">
         <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
           document

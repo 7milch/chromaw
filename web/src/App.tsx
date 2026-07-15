@@ -5,7 +5,7 @@ import { exportCollectionRecords, type ExportFilters } from "./export";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import ConfirmNameModal from "./ConfirmNameModal";
 import DocumentEditor from "./DocumentEditor";
-import MetadataEditor from "./MetadataEditor";
+import MetadataEditor, { type MetadataEditorHandle } from "./MetadataEditor";
 import RenameCollectionModal from "./RenameCollectionModal";
 import ShortcutsHelpModal from "./ShortcutsHelpModal";
 import type {
@@ -134,6 +134,8 @@ function App() {
   const [exportTruncated, setExportTruncated] = useState(false);
   const exportAbortRef = useRef<AbortController | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const metadataEditorRef = useRef<MetadataEditorHandle | null>(null);
+  const recordRowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
 
   useEffect(() => {
     apiFetch("/api/collections")
@@ -299,6 +301,18 @@ function App() {
   const selected = collections?.find((c) => c.name === selectedName) ?? null;
   const recordIds = useMemo(() => records?.map((r) => r.id) ?? [], [records]);
 
+  // Keep the selected row visible when navigating with j/k (M1-5 carry-over).
+  useEffect(() => {
+    if (!selectedRecordId) return;
+    recordRowRefs.current.get(selectedRecordId)?.scrollIntoView({ block: "nearest" });
+  }, [selectedRecordId]);
+
+  const modalOpen =
+    helpOpen ||
+    deleteRecordModalOpen ||
+    deleteCollectionModalOpen ||
+    renameCollectionModalOpen;
+
   useKeyboardShortcuts({
     searchInputRef,
     recordIds,
@@ -306,6 +320,10 @@ function App() {
     onSelectRecordId: setSelectedRecordId,
     helpOpen,
     onSetHelpOpen: setHelpOpen,
+    modalOpen,
+    isWriteMode,
+    onEditRecord: () => metadataEditorRef.current?.startEdit(),
+    onDeleteRecord: () => setDeleteRecordModalOpen(true),
   });
 
   function executeSearch() {
@@ -690,6 +708,10 @@ function App() {
                         {records.map((r) => (
                           <tr
                             key={r.id}
+                            ref={(el) => {
+                              if (el) recordRowRefs.current.set(r.id, el);
+                              else recordRowRefs.current.delete(r.id);
+                            }}
                             onClick={() => setSelectedRecordId(r.id)}
                             className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800/60 ${
                               r.id === selectedRecordId ? "bg-slate-800 text-slate-50" : ""
@@ -819,6 +841,7 @@ function App() {
 
               {isWriteMode ? (
                 <MetadataEditor
+                  ref={metadataEditorRef}
                   collectionName={selectedName!}
                   record={detailRecord}
                   onSaved={() => setRefreshTick((t) => t + 1)}
@@ -870,7 +893,9 @@ function App() {
         </aside>
       </div>
 
-      {helpOpen && <ShortcutsHelpModal onClose={() => setHelpOpen(false)} />}
+      {helpOpen && (
+        <ShortcutsHelpModal onClose={() => setHelpOpen(false)} isWriteMode={isWriteMode} />
+      )}
 
       {deleteRecordModalOpen && selectedRecordId && (
         <ConfirmNameModal

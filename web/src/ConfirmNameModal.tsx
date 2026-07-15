@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useFocusTrap } from "./useFocusTrap";
 
 interface ConfirmNameModalProps {
   /** Short action label shown in the header, e.g. "Delete record". */
@@ -32,6 +33,8 @@ export default function ConfirmNameModal({
   const [typed, setTyped] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  useFocusTrap(containerRef);
 
   const matches = typed === expected;
 
@@ -50,7 +53,13 @@ export default function ConfirmNameModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="w-full max-w-sm rounded border border-slate-700 bg-slate-900 p-4 shadow-xl">
+      <div
+        ref={containerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className="w-full max-w-sm rounded border border-slate-700 bg-slate-900 p-4 shadow-xl"
+      >
         <h2 className="mb-2 text-sm font-semibold text-slate-100">{title}</h2>
         <p className="mb-3 text-xs text-slate-400">{description}</p>
         <p className="mb-2 text-xs text-slate-400">

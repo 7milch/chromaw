@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -1660,5 +1661,489 @@ def test_post_diff_missing_required_field_returns_422(
     client = make_client(app)
 
     response = client.post("/api/diff", json={"before": "a"})
+    assert response.status_code == 422
+
+
+# --- DELETE .../records/{id} (roadmap M2-7) ---
+
+
+def test_delete_record_confirm_match_deletes(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 2)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.request(
+        "DELETE", "/api/collections/foo/records/0", json={"confirm": "0"}
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True, "id": "0"}
+
+    remaining = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert [r["id"] for r in remaining] == ["1"]
+
+
+def test_delete_record_confirm_mismatch_returns_409(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.request(
+        "DELETE", "/api/collections/foo/records/0", json={"confirm": "wrong"}
+    )
+
+    assert response.status_code == 409
+    remaining = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert [r["id"] for r in remaining] == ["0"]
+
+
+def test_delete_record_missing_confirm_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.request("DELETE", "/api/collections/foo/records/0", json={})
 
     assert response.status_code == 422
+
+
+def test_delete_record_nonexistent_record_returns_404(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.request(
+        "DELETE", "/api/collections/foo/records/missing", json={"confirm": "missing"}
+    )
+
+    assert response.status_code == 404
+
+
+def test_delete_record_nonexistent_collection_returns_404(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.request(
+        "DELETE", "/api/collections/missing/records/0", json={"confirm": "0"}
+    )
+
+    assert response.status_code == 404
+
+
+def test_delete_record_read_only_returns_403(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=False)
+    client = make_client(app)
+
+    response = client.request(
+        "DELETE", "/api/collections/foo/records/0", json={"confirm": "0"}
+    )
+
+    assert response.status_code == 403
+
+
+def test_delete_record_without_token_returns_401(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app, token=None)
+
+    response = client.request(
+        "DELETE", "/api/collections/foo/records/0", json={"confirm": "0"}
+    )
+
+    assert response.status_code == 401
+
+
+def test_delete_record_writes_audit_entry(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    client.request("DELETE", "/api/collections/foo/records/0", json={"confirm": "0"})
+
+    audit_path = tmp_path / ".chromaw" / "audit.jsonl"
+    lines = audit_path.read_text().strip().splitlines()
+    entry = json.loads(lines[-1])
+    assert entry["operation"] == "record.delete"
+    assert entry["collection"] == "foo"
+    assert entry["id"] == "0"
+    assert entry["before"]["metadata"] == {"idx": 0}
+
+
+# --- DELETE .../collections/{name} (roadmap M2-7) ---
+
+
+def test_delete_collection_confirm_match_deletes(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.request("DELETE", "/api/collections/foo", json={"confirm": "foo"})
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True, "id": "foo"}
+    assert client.get("/api/collections").json()["collections"] == []
+
+
+def test_delete_collection_confirm_mismatch_returns_409(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.request("DELETE", "/api/collections/foo", json={"confirm": "bar"})
+
+    assert response.status_code == 409
+    names = [c["name"] for c in client.get("/api/collections").json()["collections"]]
+    assert names == ["foo"]
+
+
+def test_delete_collection_nonexistent_returns_404(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.request(
+        "DELETE", "/api/collections/missing", json={"confirm": "missing"}
+    )
+
+    assert response.status_code == 404
+
+
+def test_delete_collection_read_only_returns_403(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=False)
+    client = make_client(app)
+
+    response = client.request("DELETE", "/api/collections/foo", json={"confirm": "foo"})
+
+    assert response.status_code == 403
+
+
+def test_delete_collection_without_token_returns_401(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app, token=None)
+
+    response = client.request("DELETE", "/api/collections/foo", json={"confirm": "foo"})
+
+    assert response.status_code == 401
+
+
+def test_delete_collection_writes_audit_entry(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    client.request("DELETE", "/api/collections/foo", json={"confirm": "foo"})
+
+    audit_path = tmp_path / ".chromaw" / "audit.jsonl"
+    entry = json.loads(audit_path.read_text().strip().splitlines()[-1])
+    assert entry["operation"] == "collection.delete"
+    assert entry["collection"] == "foo"
+
+
+# --- PATCH .../collections/{name} rename (roadmap M2-7) ---
+
+
+def test_rename_collection_confirm_match_renames(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo", json={"name": "bar", "confirm": "foo"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "bar"
+    names = [c["name"] for c in client.get("/api/collections").json()["collections"]]
+    assert names == ["bar"]
+
+
+def test_rename_collection_old_name_returns_404_after_rename(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    client.patch("/api/collections/foo", json={"name": "bar", "confirm": "foo"})
+
+    old_name_response = client.get("/api/collections/foo/records?limit=10")
+    assert old_name_response.status_code == 404
+
+    new_name_response = client.get("/api/collections/bar/records?limit=10")
+    assert new_name_response.status_code == 200
+
+
+def test_rename_collection_confirm_mismatch_returns_409(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo", json={"name": "bar", "confirm": "wrong"}
+    )
+
+    assert response.status_code == 409
+    names = [c["name"] for c in client.get("/api/collections").json()["collections"]]
+    assert names == ["foo"]
+
+
+def test_rename_collection_missing_confirm_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch("/api/collections/foo", json={"name": "bar"})
+
+    assert response.status_code == 422
+
+
+def test_rename_collection_duplicate_name_returns_409(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+    _add_records(tmp_path, "bar", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo", json={"name": "bar", "confirm": "foo"}
+    )
+
+    assert response.status_code == 409
+
+
+def test_rename_collection_nonexistent_returns_404(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/missing", json={"name": "bar", "confirm": "missing"}
+    )
+
+    assert response.status_code == 404
+
+
+def test_rename_collection_read_only_returns_403(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=False)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo", json={"name": "bar", "confirm": "foo"}
+    )
+
+    assert response.status_code == 403
+
+
+def test_rename_collection_without_token_returns_401(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app, token=None)
+
+    response = client.patch(
+        "/api/collections/foo", json={"name": "bar", "confirm": "foo"}
+    )
+
+    assert response.status_code == 401
+
+
+def test_rename_collection_writes_audit_entry(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    client.patch("/api/collections/foo", json={"name": "bar", "confirm": "foo"})
+
+    audit_path = tmp_path / ".chromaw" / "audit.jsonl"
+    entry = json.loads(audit_path.read_text().strip().splitlines()[-1])
+    assert entry["operation"] == "collection.rename"
+    assert entry["changes"]["name"] == {"before": "foo", "after": "bar"}
+
+
+def test_patch_collection_metadata_only_does_not_require_confirm(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch("/api/collections/foo", json={"metadata": {"k": "v"}})
+
+    assert response.status_code == 200
+    assert response.json()["metadata"] == {"k": "v"}
+
+
+def test_patch_collection_empty_body_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch("/api/collections/foo", json={})
+
+    assert response.status_code == 422
+
+
+# --- M2-7 edge cases: confirm exact-match, re-delete, rename no-op, i18n audit ---
+
+
+def test_delete_record_confirm_with_surrounding_whitespace_returns_409(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.request(
+        "DELETE", "/api/collections/foo/records/0", json={"confirm": " 0 "}
+    )
+
+    assert response.status_code == 409
+
+
+def test_delete_collection_confirm_wrong_case_returns_409(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "Foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.request("DELETE", "/api/collections/Foo", json={"confirm": "foo"})
+
+    assert response.status_code == 409
+
+
+def test_delete_record_second_delete_returns_404(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    first = client.request("DELETE", "/api/collections/foo/records/0", json={"confirm": "0"})
+    assert first.status_code == 200
+
+    second = client.request("DELETE", "/api/collections/foo/records/0", json={"confirm": "0"})
+    assert second.status_code == 404
+
+
+def test_delete_collection_second_delete_returns_404(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    first = client.request("DELETE", "/api/collections/foo", json={"confirm": "foo"})
+    assert first.status_code == 200
+
+    second = client.request("DELETE", "/api/collections/foo", json={"confirm": "foo"})
+    assert second.status_code == 404
+
+
+def test_rename_collection_to_same_name(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo", json={"name": "foo", "confirm": "foo"}
+    )
+
+    # Documents observed behavior: renaming a collection to its own current
+    # name is accepted as a no-op rename (chromadb allows modify(name=same)),
+    # not rejected as a duplicate-name conflict.
+    assert response.status_code == 200
+    assert response.json()["name"] == "foo"
+
+
+def test_collection_usable_under_new_name_after_rename(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    rename = client.patch("/api/collections/foo", json={"name": "bar", "confirm": "foo"})
+    assert rename.status_code == 200
+
+    records = client.get("/api/collections/bar/records")
+    assert records.status_code == 200
+    assert records.json()["total"] == 1
+
+    patch = client.patch(
+        "/api/collections/bar/records/0", json={"metadata": {"k": "v"}}
+    )
+    assert patch.status_code == 200
+    assert patch.json()["metadata"]["k"] == "v"
+
+
+def test_delete_collection_with_japanese_metadata_writes_audit_entry(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    client.patch("/api/collections/foo", json={"metadata": {"名前": "日本語の値"}})
+
+    client.request("DELETE", "/api/collections/foo", json={"confirm": "foo"})
+
+    audit_path = tmp_path / ".chromaw" / "audit.jsonl"
+    lines = audit_path.read_text().strip().splitlines()
+    entry = json.loads(lines[-1])
+    assert entry["operation"] == "collection.delete"
+    assert entry["collection"] == "foo"
+    assert entry["before"]["metadata"]["名前"] == "日本語の値"

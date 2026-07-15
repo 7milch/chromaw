@@ -48,6 +48,25 @@ export interface RecordUpdateRequest {
   embedding_mode?: "keep" | null;
 }
 
+export interface RecordDeleteRequest {
+  confirm: string;
+}
+
+export interface CollectionDeleteRequest {
+  confirm: string;
+}
+
+export interface CollectionUpdateRequest {
+  name?: string;
+  metadata?: Record<string, unknown>;
+  confirm?: string;
+}
+
+export interface DeleteResponse {
+  deleted: boolean;
+  id: string;
+}
+
 export interface DiffRequest {
   before: string;
   after: string;

@@ -8,7 +8,9 @@ from chromaw.errors import (
     ChromaEmptyDirectoryError,
     ChromaInvalidDirectoryError,
     ChromaPathNotFoundError,
+    CollectionAlreadyExistsError,
     CollectionNotFoundError,
+    InvalidCollectionNameError,
     InvalidFilterError,
     RecordNotFoundError,
 )
@@ -877,3 +879,138 @@ def test_update_record_no_mark_stale_leaves_metadata_untouched(tmp_path: Path) -
 
     records, _, _ = adapter.get_records("foo", ids=["1"])
     assert records[0].metadata == {"a": 1}
+
+
+# --- delete_record / delete_collection / update_collection (roadmap M2-7) ---
+
+
+def test_delete_record_removes_record(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1", "2"], embeddings=[[0.1, 0.2], [0.3, 0.4]])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    adapter.delete_record("foo", "1")
+
+    records, _, _ = adapter.get_records("foo")
+    assert [r.id for r in records] == ["2"]
+
+
+def test_delete_record_nonexistent_id_raises(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    client.create_collection("foo")
+
+    adapter = ChromaAdapter.open(tmp_path)
+
+    with pytest.raises(RecordNotFoundError):
+        adapter.delete_record("foo", "missing")
+
+
+def test_delete_record_nonexistent_collection_raises(tmp_path: Path) -> None:
+    adapter = ChromaAdapter.open(tmp_path, create=True)
+
+    with pytest.raises(CollectionNotFoundError):
+        adapter.delete_record("missing", "1")
+
+
+def test_delete_record_persists_across_adapter_instances(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]])
+
+    adapter1 = ChromaAdapter.open(tmp_path)
+    adapter1.delete_record("foo", "1")
+
+    adapter2 = ChromaAdapter.open(tmp_path)
+    records, _, _ = adapter2.get_records("foo")
+    assert records == []
+
+
+def test_delete_collection_removes_collection(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    client.create_collection("foo")
+
+    adapter = ChromaAdapter.open(tmp_path)
+    adapter.delete_collection("foo")
+
+    assert adapter.list_collections() == []
+
+
+def test_delete_collection_nonexistent_raises(tmp_path: Path) -> None:
+    adapter = ChromaAdapter.open(tmp_path, create=True)
+
+    with pytest.raises(CollectionNotFoundError):
+        adapter.delete_collection("missing")
+
+
+def test_delete_collection_persists_across_adapter_instances(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    client.create_collection("foo")
+
+    adapter1 = ChromaAdapter.open(tmp_path)
+    adapter1.delete_collection("foo")
+
+    adapter2 = ChromaAdapter.open(tmp_path)
+    assert adapter2.list_collections() == []
+
+
+def test_update_collection_renames_collection(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    client.create_collection("foo")
+
+    adapter = ChromaAdapter.open(tmp_path)
+    info = adapter.update_collection("foo", new_name="bar")
+
+    assert info.name == "bar"
+    names = [c.name for c in adapter.list_collections()]
+    assert names == ["bar"]
+
+
+def test_update_collection_rename_nonexistent_raises(tmp_path: Path) -> None:
+    adapter = ChromaAdapter.open(tmp_path, create=True)
+
+    with pytest.raises(CollectionNotFoundError):
+        adapter.update_collection("missing", new_name="bar")
+
+
+def test_update_collection_rename_to_existing_name_raises(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    client.create_collection("foo")
+    client.create_collection("bar")
+
+    adapter = ChromaAdapter.open(tmp_path)
+
+    with pytest.raises(CollectionAlreadyExistsError):
+        adapter.update_collection("foo", new_name="bar")
+
+
+def test_update_collection_rename_to_invalid_name_raises(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    client.create_collection("foo")
+
+    adapter = ChromaAdapter.open(tmp_path)
+
+    with pytest.raises(InvalidCollectionNameError):
+        adapter.update_collection("foo", new_name="a")
+
+
+def test_update_collection_metadata_merges(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    client.create_collection("foo", metadata={"a": 1})
+
+    adapter = ChromaAdapter.open(tmp_path)
+    info = adapter.update_collection("foo", metadata={"b": 2})
+
+    assert info.metadata == {"a": 1, "b": 2}
+
+
+def test_update_collection_rename_persists_across_adapter_instances(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    client.create_collection("foo")
+
+    adapter1 = ChromaAdapter.open(tmp_path)
+    adapter1.update_collection("foo", new_name="bar")
+
+    adapter2 = ChromaAdapter.open(tmp_path)
+    names = [c.name for c in adapter2.list_collections()]
+    assert names == ["bar"]

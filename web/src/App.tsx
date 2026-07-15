@@ -3,8 +3,10 @@ import { apiFetch } from "./api";
 import { useAppConfig } from "./AppConfigContext";
 import { exportCollectionRecords, type ExportFilters } from "./export";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
+import ConfirmNameModal from "./ConfirmNameModal";
 import DocumentEditor from "./DocumentEditor";
 import MetadataEditor from "./MetadataEditor";
+import RenameCollectionModal from "./RenameCollectionModal";
 import ShortcutsHelpModal from "./ShortcutsHelpModal";
 import type {
   CollectionInfo,
@@ -116,6 +118,16 @@ function App() {
 
   const [helpOpen, setHelpOpen] = useState(false);
 
+  // Bumped after a collection/record delete or a collection rename to
+  // force the collections list and/or the records page to refetch, same
+  // ``refreshTick`` pattern as the record detail refresh above.
+  const [collectionsRefreshTick, setCollectionsRefreshTick] = useState(0);
+  const [recordsRefreshTick, setRecordsRefreshTick] = useState(0);
+
+  const [deleteRecordModalOpen, setDeleteRecordModalOpen] = useState(false);
+  const [deleteCollectionModalOpen, setDeleteCollectionModalOpen] = useState(false);
+  const [renameCollectionModalOpen, setRenameCollectionModalOpen] = useState(false);
+
   const [exportRunning, setExportRunning] = useState(false);
   const [exportCount, setExportCount] = useState(0);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -135,7 +147,7 @@ function App() {
       .catch((err: unknown) => {
         setError(err instanceof Error ? err.message : String(err));
       });
-  }, []);
+  }, [collectionsRefreshTick]);
 
   // Reset paging/selection/search whenever the selected collection changes.
   useEffect(() => {
@@ -231,7 +243,7 @@ function App() {
     return () => {
       ignore = true;
     };
-  }, [selectedName, offset, activeSearch]);
+  }, [selectedName, offset, activeSearch, recordsRefreshTick]);
 
   // Fetch full detail (including embeddings) for the selected record.
   // Same out-of-order-response guard as the records list fetch above.
@@ -377,6 +389,67 @@ function App() {
     exportAbortRef.current?.abort();
   }
 
+  /**
+   * Shared error-extraction for the delete/rename fetches below (technical
+   * -spec §3.2, §6.5, roadmap M2-7): surfaces the server's ``detail``
+   * message (e.g. a 409 confirm-mismatch or duplicate-name error) so
+   * ``ConfirmNameModal``/``RenameCollectionModal`` can display it.
+   */
+  async function throwOnError(res: Response): Promise<void> {
+    if (res.ok) return;
+    let detail = `request failed: ${res.status}`;
+    const payload = await res.json().catch(() => null);
+    if (payload && typeof payload.detail === "string") {
+      detail = payload.detail;
+    }
+    throw new Error(detail);
+  }
+
+  async function deleteRecord() {
+    if (!selectedName || !selectedRecordId) return;
+    const res = await apiFetch(
+      `/api/collections/${encodeURIComponent(selectedName)}/records/${encodeURIComponent(
+        selectedRecordId
+      )}`,
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: selectedRecordId }),
+      }
+    );
+    await throwOnError(res);
+    setDeleteRecordModalOpen(false);
+    setSelectedRecordId(null);
+    setRecordsRefreshTick((t) => t + 1);
+    setCollectionsRefreshTick((t) => t + 1);
+  }
+
+  async function deleteCollection() {
+    if (!selectedName) return;
+    const res = await apiFetch(`/api/collections/${encodeURIComponent(selectedName)}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: selectedName }),
+    });
+    await throwOnError(res);
+    setDeleteCollectionModalOpen(false);
+    setSelectedName(null);
+    setCollectionsRefreshTick((t) => t + 1);
+  }
+
+  async function renameCollection(newName: string) {
+    if (!selectedName) return;
+    const res = await apiFetch(`/api/collections/${encodeURIComponent(selectedName)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: newName, confirm: selectedName }),
+    });
+    await throwOnError(res);
+    setRenameCollectionModalOpen(false);
+    setSelectedName(newName);
+    setCollectionsRefreshTick((t) => t + 1);
+  }
+
   // ids-based search returns every match in one page (chromaw ignores
   // limit/offset for it server-side), so paging controls are meaningless
   // and disabled in that mode.
@@ -468,6 +541,24 @@ function App() {
                     </span>
                   </button>
                   <div className="ml-3 flex shrink-0 items-center gap-2">
+                    {isWriteMode && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setRenameCollectionModalOpen(true)}
+                          className="rounded border border-slate-700 px-2 py-1 text-xs hover:bg-slate-800"
+                        >
+                          Rename
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDeleteCollectionModalOpen(true)}
+                          className="rounded border border-red-800 px-2 py-1 text-xs text-red-300 hover:bg-red-900/40"
+                        >
+                          Delete
+                        </button>
+                      </>
+                    )}
                     {exportRunning ? (
                       <>
                         <span className="text-xs text-slate-400">
@@ -690,9 +781,20 @@ function App() {
           {selectedRecordId && !detailLoading && !detailError && detailRecord && (
             <div className="mt-2 space-y-4 text-sm">
               <div>
-                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  id
-                </h3>
+                <div className="mb-1 flex items-center justify-between">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    id
+                  </h3>
+                  {isWriteMode && (
+                    <button
+                      type="button"
+                      onClick={() => setDeleteRecordModalOpen(true)}
+                      className="rounded border border-red-800 px-2 py-0.5 text-xs text-red-300 hover:bg-red-900/40"
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
                 <code className="block select-all break-all rounded bg-slate-900 px-2 py-1 text-xs text-slate-300">
                   {detailRecord.id}
                 </code>
@@ -769,6 +871,36 @@ function App() {
       </div>
 
       {helpOpen && <ShortcutsHelpModal onClose={() => setHelpOpen(false)} />}
+
+      {deleteRecordModalOpen && selectedRecordId && (
+        <ConfirmNameModal
+          title="Delete record"
+          description={`This permanently deletes record ${selectedRecordId} from collection ${selectedName}.`}
+          expected={selectedRecordId}
+          confirmLabel="Delete"
+          onConfirm={deleteRecord}
+          onCancel={() => setDeleteRecordModalOpen(false)}
+        />
+      )}
+
+      {deleteCollectionModalOpen && selectedName && (
+        <ConfirmNameModal
+          title="Delete collection"
+          description={`This permanently deletes the collection "${selectedName}" and all of its records.`}
+          expected={selectedName}
+          confirmLabel="Delete"
+          onConfirm={deleteCollection}
+          onCancel={() => setDeleteCollectionModalOpen(false)}
+        />
+      )}
+
+      {renameCollectionModalOpen && selectedName && (
+        <RenameCollectionModal
+          currentName={selectedName}
+          onConfirm={renameCollection}
+          onCancel={() => setRenameCollectionModalOpen(false)}
+        />
+      )}
     </div>
   );
 }

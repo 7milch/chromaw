@@ -57,6 +57,16 @@ export interface CollectionDeleteRequest {
   confirm: string;
 }
 
+export interface BulkDeleteRequest {
+  ids: string[];
+  confirm: string;
+}
+
+export interface BulkDeleteResponse {
+  deleted: string[];
+  skipped: string[];
+}
+
 export interface CollectionUpdateRequest {
   name?: string;
   metadata?: Record<string, unknown>;

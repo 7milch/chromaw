@@ -2397,6 +2397,315 @@ def test_delete_collection_with_japanese_metadata_writes_audit_entry(
     assert entry["before"]["metadata"]["名前"] == "日本語の値"
 
 
+# --- POST .../records/bulk-delete (roadmap M4-2) ---
+
+
+def test_bulk_delete_confirm_match_deletes(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 3)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": ["0", "1"], "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert sorted(body["deleted"]) == ["0", "1"]
+    assert body["skipped"] == []
+
+    remaining = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert [r["id"] for r in remaining] == ["2"]
+
+
+def test_bulk_delete_confirm_mismatch_returns_409(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 2)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": ["0"], "confirm": "wrong"},
+    )
+
+    assert response.status_code == 409
+    remaining = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert len(remaining) == 2
+
+
+def test_bulk_delete_partial_existing_ids_deletes_existing_and_reports_skipped(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 2)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": ["0", "missing-1", "missing-2"], "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["deleted"] == ["0"]
+    assert sorted(body["skipped"]) == ["missing-1", "missing-2"]
+
+    remaining = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert [r["id"] for r in remaining] == ["1"]
+
+
+def test_bulk_delete_all_ids_nonexistent_returns_200_with_empty_deleted(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": ["missing"], "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["deleted"] == []
+    assert body["skipped"] == ["missing"]
+
+    remaining = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert [r["id"] for r in remaining] == ["0"]
+
+
+def test_bulk_delete_nonexistent_collection_returns_404(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/missing/records/bulk-delete",
+        json={"ids": ["0"], "confirm": "missing"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_bulk_delete_read_only_returns_403(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=False)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": ["0"], "confirm": "foo"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_bulk_delete_without_token_returns_401(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app, token=None)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": ["0"], "confirm": "foo"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_bulk_delete_empty_ids_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": [], "confirm": "foo"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_bulk_delete_duplicate_ids_deletes_once(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 2)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": ["0", "0"], "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] == ["0"]
+
+    remaining = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert [r["id"] for r in remaining] == ["1"]
+
+
+def test_bulk_delete_writes_single_audit_entry_with_all_before(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 3)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": ["0", "1", "missing"], "confirm": "foo"},
+    )
+
+    audit_path = tmp_path / ".chromaw" / "audit.jsonl"
+    lines = audit_path.read_text().strip().splitlines()
+    entry = json.loads(lines[-1])
+    assert entry["operation"] == "record.bulk_delete"
+    assert entry["collection"] == "foo"
+    assert sorted(entry["deleted"].keys()) == ["0", "1"]
+    assert entry["deleted"]["0"]["metadata"] == {"idx": 0}
+    assert entry["deleted"]["1"]["metadata"] == {"idx": 1}
+    assert entry["skipped"] == ["missing"]
+
+
+def test_bulk_delete_all_ids_nonexistent_writes_no_audit_entry(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """When every requested id is missing, deleted is empty, so no
+    ``record.bulk_delete`` audit entry (or even the audit file) should be
+    written -- a request that deleted nothing performed no write."""
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": ["missing"], "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    audit_path = tmp_path / ".chromaw" / "audit.jsonl"
+    assert not audit_path.exists()
+
+
+def test_bulk_delete_large_batch_of_1000_ids(tmp_path: Path, make_app, make_client) -> None:
+    """A large selection (1000 ids) should delete all matching records and
+    report none skipped, without truncation or timeout."""
+    _add_records(tmp_path, "foo", 1000)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    all_ids = [str(i) for i in range(1000)]
+    response = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": all_ids, "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert sorted(body["deleted"], key=int) == all_ids
+    assert body["skipped"] == []
+
+    remaining = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert remaining == []
+
+
+def test_bulk_delete_japanese_ids(tmp_path: Path, make_app, make_client) -> None:
+    """Record ids containing Japanese characters must be deletable via bulk
+    delete like any other id (chromadb ids are unicode-safe)."""
+    import chromadb
+
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client_lib.create_collection("foo")
+    collection.add(
+        ids=["レコード1", "レコード2", "record-3"],
+        documents=["日本語ドキュメント1", "日本語ドキュメント2", "doc-3"],
+        metadatas=[{"idx": 1}, {"idx": 2}, {"idx": 3}],
+    )
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": ["レコード1", "レコード2"], "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert sorted(body["deleted"]) == sorted(["レコード1", "レコード2"])
+    assert body["skipped"] == []
+
+    remaining = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert [r["id"] for r in remaining] == ["record-3"]
+
+
+def test_bulk_delete_same_ids_again_reports_all_skipped(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """Re-issuing a bulk-delete for the same ids after they were already
+    deleted must be idempotent: 200, empty deleted, all requested ids
+    skipped -- no error, no re-deletion."""
+    _add_records(tmp_path, "foo", 3)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    first = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": ["0", "1"], "confirm": "foo"},
+    )
+    assert first.status_code == 200
+    assert sorted(first.json()["deleted"]) == ["0", "1"]
+
+    second = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": ["0", "1"], "confirm": "foo"},
+    )
+
+    assert second.status_code == 200
+    body = second.json()
+    assert body["deleted"] == []
+    assert sorted(body["skipped"]) == ["0", "1"]
+
+    remaining = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert [r["id"] for r in remaining] == ["2"]
+
+
+def test_bulk_delete_confirm_from_different_collection_returns_409(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """``confirm`` must match *this* collection's name exactly; the name of
+    another real collection is still a mismatch and must 409, not be
+    treated as a valid confirmation."""
+    _add_records(tmp_path, "foo", 2)
+    _add_records(tmp_path, "bar", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": ["0"], "confirm": "bar"},
+    )
+
+    assert response.status_code == 409
+    remaining = client.get("/api/collections/foo/records?limit=10").json()["records"]
+    assert len(remaining) == 2
+
+
 # ---------------------------------------------------------------------------
 # POST /api/collections/{name}/query (technical-spec §5.6 4, §8.4, roadmap
 # M3-1)

@@ -51,7 +51,7 @@
 ## Milestone 4: Bulk / import-export
 
 - [x] M4-1: selected export (Issue #27)
-- [ ] M4-2: bulk delete（advanced + 確認フロー）
+- [x] M4-2: bulk delete（advanced + 確認フロー） (Issue #28)
 - [ ] M4-3: JSONL import / export
 - [ ] M4-4: bulk metadata patch
 - [ ] M4-5: Playwright UI テスト

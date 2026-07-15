@@ -13,6 +13,7 @@ import MetadataEditor, { type MetadataEditorHandle } from "./MetadataEditor";
 import RenameCollectionModal from "./RenameCollectionModal";
 import ShortcutsHelpModal from "./ShortcutsHelpModal";
 import type {
+  BulkDeleteResponse,
   CollectionInfo,
   CollectionsResponse,
   QueryRequest,
@@ -161,6 +162,16 @@ function App() {
   const [deleteRecordModalOpen, setDeleteRecordModalOpen] = useState(false);
   const [deleteCollectionModalOpen, setDeleteCollectionModalOpen] = useState(false);
   const [renameCollectionModalOpen, setRenameCollectionModalOpen] = useState(false);
+
+  // Bulk delete of the current multi-selection (M4-2, technical-spec §6.5):
+  // confirmed via the collection name (mirrors DELETE .../collections/{name},
+  // since a bulk operation has no single record id to type). ``bulkDeleteResult``
+  // holds the last response's deleted/skipped counts so they can be surfaced
+  // to the user after the modal closes.
+  const [bulkDeleteModalOpen, setBulkDeleteModalOpen] = useState(false);
+  const [bulkDeleteResult, setBulkDeleteResult] = useState<BulkDeleteResponse | null>(
+    null
+  );
 
   const [exportRunning, setExportRunning] = useState(false);
   const [exportCount, setExportCount] = useState(0);
@@ -410,7 +421,8 @@ function App() {
     helpOpen ||
     deleteRecordModalOpen ||
     deleteCollectionModalOpen ||
-    renameCollectionModalOpen;
+    renameCollectionModalOpen ||
+    bulkDeleteModalOpen;
 
   useKeyboardShortcuts({
     searchInputRef,
@@ -653,6 +665,28 @@ function App() {
     setCollectionsRefreshTick((t) => t + 1);
   }
 
+  async function bulkDeleteSelected() {
+    if (!selectedName || selectedIds.size === 0) return;
+    const res = await apiFetch(
+      `/api/collections/${encodeURIComponent(selectedName)}/records/bulk-delete`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ids: Array.from(selectedIds),
+          confirm: selectedName,
+        }),
+      }
+    );
+    await throwOnError(res);
+    const result = (await res.json()) as BulkDeleteResponse;
+    setBulkDeleteResult(result);
+    setBulkDeleteModalOpen(false);
+    setSelectedIds(new Set());
+    setRecordsRefreshTick((t) => t + 1);
+    setCollectionsRefreshTick((t) => t + 1);
+  }
+
   async function renameCollection(newName: string) {
     if (!selectedName) return;
     const res = await apiFetch(`/api/collections/${encodeURIComponent(selectedName)}`, {
@@ -790,6 +824,18 @@ function App() {
                             ? "Exporting..."
                             : `Export selected (${selectedIds.size})`}
                         </button>
+                        {isWriteMode && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBulkDeleteResult(null);
+                              setBulkDeleteModalOpen(true);
+                            }}
+                            className="rounded border border-red-800 px-2 py-1 text-xs text-red-300 hover:bg-red-900/40"
+                          >
+                            {`Delete selected (${selectedIds.size})`}
+                          </button>
+                        )}
                       </>
                     )}
                     {exportRunning ? (
@@ -834,6 +880,16 @@ function App() {
                 {!selectedExportRunning && selectedExportTruncated && (
                   <p className="border-t border-slate-800 px-3 py-1 text-xs text-amber-400">
                     Selected export truncated at 100,000 records.
+                  </p>
+                )}
+                {bulkDeleteResult && (
+                  <p className="border-t border-slate-800 px-3 py-1 text-xs text-slate-400">
+                    Deleted {bulkDeleteResult.deleted.length} record
+                    {bulkDeleteResult.deleted.length === 1 ? "" : "s"}
+                    {bulkDeleteResult.skipped.length > 0
+                      ? ` (${bulkDeleteResult.skipped.length} already gone, skipped)`
+                      : ""}
+                    .
                   </p>
                 )}
                 {detailOpen && (
@@ -1297,6 +1353,17 @@ function App() {
           confirmLabel="Delete"
           onConfirm={deleteCollection}
           onCancel={() => setDeleteCollectionModalOpen(false)}
+        />
+      )}
+
+      {bulkDeleteModalOpen && selectedName && (
+        <ConfirmNameModal
+          title="Delete selected records"
+          description={`This permanently deletes ${selectedIds.size} selected record(s) from collection "${selectedName}".`}
+          expected={selectedName}
+          confirmLabel="Delete"
+          onConfirm={bulkDeleteSelected}
+          onCancel={() => setBulkDeleteModalOpen(false)}
         />
       )}
 

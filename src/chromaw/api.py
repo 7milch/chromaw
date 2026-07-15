@@ -11,6 +11,8 @@ from chromaw.errors import (
     RecordNotFoundError,
 )
 from chromaw.models import (
+    BulkDeleteRequest,
+    BulkDeleteResponse,
     CollectionDeleteRequest,
     CollectionInfo,
     CollectionsResponse,
@@ -289,6 +291,73 @@ def delete_record(
         )
 
     return DeleteResponse(deleted=True, id=record_id)
+
+
+@router.post(
+    "/collections/{name}/records/bulk-delete",
+    response_model=BulkDeleteResponse,
+    dependencies=[Depends(require_write_mode)],
+)
+def bulk_delete_records(
+    name: str,
+    request: Request,
+    body: BulkDeleteRequest,
+) -> BulkDeleteResponse:
+    """Delete multiple records from a collection in one request
+    (technical-spec §3.2, §6.5, roadmap M4-2).
+
+    ``body.confirm`` must equal the *collection's* name exactly -- unlike
+    the single-record ``DELETE .../records/{id}`` endpoint (which requires
+    typing the one record id being deleted), a bulk operation has no single
+    natural id to type, so it follows the same "type the collection name"
+    confirmation as ``DELETE .../collections/{name}`` instead. The
+    collection's existence is checked first (via ``_find_collection``, 404
+    if missing) before the ``confirm`` comparison, matching the other
+    delete endpoints' 404-before-409 ordering.
+
+    Requested ids that don't exist are skipped rather than causing the
+    whole request to fail (chromaw's bulk operations make best-effort
+    progress on whatever of the selection is actually present); the
+    response's ``deleted``/``skipped`` lists let the caller reconcile its
+    selection against what really happened. If every requested id turns out
+    to be nonexistent, ``deleted`` is simply empty -- still a 200, since the
+    request itself was well-formed and the collection did exist.
+
+    Follows the same backup-then-mutate-then-audit sequence as
+    ``delete_record``; all deleted records' full pre-deletion snapshots are
+    captured and recorded as a single audit entry (``AuditLogger.
+    log_bulk_delete_records``) rather than one entry per record, since this
+    is one user action. The audit entry is skipped entirely if nothing was
+    actually deleted (all requested ids were nonexistent), consistent with
+    "every write is recorded" -- a request that deleted nothing performed no
+    write.
+    """
+
+    backup_manager = request.app.state.backup_manager
+    if backup_manager is not None:
+        backup_manager.ensure_backup()
+
+    _find_collection(request, name)
+
+    if body.confirm != name:
+        raise ConfirmationMismatchError(
+            f"confirm {body.confirm!r} does not match collection name {name!r}"
+        )
+
+    adapter = request.app.state.adapter
+    deleted_records, skipped_ids = adapter.bulk_delete_records(name, body.ids)
+
+    audit_logger = request.app.state.audit_logger
+    if audit_logger is not None and deleted_records:
+        audit_logger.log_bulk_delete_records(
+            collection=name,
+            deleted={record.id: record.model_dump() for record in deleted_records},
+            skipped=skipped_ids,
+        )
+
+    return BulkDeleteResponse(
+        deleted=[record.id for record in deleted_records], skipped=skipped_ids
+    )
 
 
 @router.delete(

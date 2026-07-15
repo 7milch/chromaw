@@ -162,6 +162,24 @@ def test_read_only_mode_never_creates_backup(
     assert not (tmp_path / ".chromaw").exists()
 
 
+def test_bulk_delete_creates_backup(
+    write_app_and_client: tuple[FastAPI, TestClient, Path],
+) -> None:
+    """POST .../records/bulk-delete must trigger the same first-write backup
+    as PATCH (roadmap M4-2, matching M2-5's "backup before first write")."""
+    app, client, chroma_path = write_app_and_client
+
+    response = client.post(
+        "/api/collections/foo/records/bulk-delete",
+        json={"ids": ["1"], "confirm": "foo"},
+    )
+
+    assert response.status_code == 200
+    backups_root = chroma_path / ".chromaw" / "backups"
+    assert backups_root.is_dir()
+    assert len(list(backups_root.iterdir())) == 1
+
+
 def test_backup_failure_blocks_write_and_returns_500(
     write_app_and_client: tuple[FastAPI, TestClient, Path],
 ) -> None:

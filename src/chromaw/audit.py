@@ -100,6 +100,37 @@ class AuditLogger:
         }
         self._append(entry)
 
+    def log_bulk_delete_records(
+        self,
+        *,
+        collection: str,
+        deleted: dict[str, dict[str, Any]],
+        skipped: list[str],
+    ) -> None:
+        """Append a single ``record.bulk_delete`` entry for a bulk-delete
+        operation (roadmap M4-2).
+
+        ``deleted`` maps each actually-deleted record id to its full
+        pre-deletion snapshot (document/metadata/uri), matching
+        ``log_delete_record``'s ``before``. All records removed by one bulk
+        operation are recorded as a single JSONL line (rather than one line
+        per record, as ``log_delete_record`` would produce if called in a
+        loop) so the audit log reflects that this was one user action and
+        stays easy to scan for "what did this bulk delete touch" without
+        needing to correlate many adjacent lines. ``skipped`` lists
+        requested ids that did not exist and were therefore not deleted.
+        """
+
+        entry = {
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "operation": "record.bulk_delete",
+            "collection": collection,
+            "deleted": deleted,
+            "skipped": skipped,
+            "user_agent": f"chromaw/{__version__}",
+        }
+        self._append(entry)
+
     def log_delete_collection(
         self,
         *,

@@ -227,6 +227,35 @@ class RecordDeleteRequest(BaseModel):
     confirm: str
 
 
+class BulkDeleteRequest(BaseModel):
+    """Request body for ``POST /api/collections/{name}/records/bulk-delete``
+    (technical-spec §3.2, §6.5, roadmap M4-2).
+
+    Bulk deletion is destructive, so ``confirm`` must be given -- like
+    ``CollectionDeleteRequest``, it is checked against the *collection's*
+    name (not a per-record id, since there are many), matching the M2-7
+    "type the target name" confirmation principle. ``ids`` must be
+    non-empty (422 otherwise); duplicates are tolerated (the adapter
+    de-duplicates internally, same as ``RecordsGetRequest``'s ``ids``).
+    """
+
+    ids: list[str] = Field(min_length=1)
+    confirm: str
+
+
+class BulkDeleteResponse(BaseModel):
+    """Response body for ``POST /api/collections/{name}/records/bulk-delete``.
+
+    ``deleted`` lists the ids that actually existed and were removed;
+    ``skipped`` lists the requested ids that did not exist in the
+    collection (and were therefore left untouched) so the caller can
+    reconcile its selection against what really happened.
+    """
+
+    deleted: list[str]
+    skipped: list[str]
+
+
 class CollectionDeleteRequest(BaseModel):
     """Request body for ``DELETE /api/collections/{name}`` (technical-spec
     §3.2, §5.2, §6.5, roadmap M2-7).

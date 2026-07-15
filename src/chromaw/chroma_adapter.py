@@ -598,6 +598,56 @@ class ChromaAdapter:
 
         collection.delete(ids=[record_id])
 
+    def bulk_delete_records(
+        self, name: str, ids: list[str]
+    ) -> tuple[list[RecordInfo], list[str]]:
+        """Delete multiple records from the collection named ``name`` in one
+        call (technical-spec §3.2, §6.5, roadmap M4-2).
+
+        Existence of each requested id is checked up front (mirroring
+        ``delete_record``'s single-id existence check) via
+        ``collection.get(ids=...)``: ids that exist are captured as full
+        ``RecordInfo`` snapshots (document/metadata/uris, used by the caller
+        as the audit log's ``before`` values) and passed to
+        ``collection.delete()``; ids that don't exist are skipped rather
+        than raising, since a bulk operation should still make progress on
+        whichever of the requested ids are actually present. Duplicate ids
+        are de-duplicated (same as ``get_records``' ``ids`` handling) so
+        chromadb's ``DuplicateIDError`` is never hit.
+
+        Returns a ``(deleted_records, skipped_ids)`` tuple: ``deleted_records``
+        are the full pre-deletion snapshots of the ids that were actually
+        removed (in the order given, deduplicated), and ``skipped_ids`` are
+        the requested ids that did not exist in the collection.
+
+        Raises:
+            CollectionNotFoundError: no collection named ``name`` exists.
+        """
+        try:
+            collection = self._client.get_collection(name)
+        except Exception as exc:
+            raise CollectionNotFoundError(f"collection not found: {name}") from exc
+
+        seen: set[str] = set()
+        deduped_ids: list[str] = []
+        for record_id in ids:
+            if record_id not in seen:
+                seen.add(record_id)
+                deduped_ids.append(record_id)
+
+        existing_records, _, _ = self.get_records(
+            name,
+            ids=deduped_ids,
+            include=("documents", "metadatas", "uris"),
+        )
+        existing_ids = {record.id for record in existing_records}
+        skipped_ids = [rid for rid in deduped_ids if rid not in existing_ids]
+
+        if existing_ids:
+            collection.delete(ids=[record.id for record in existing_records])
+
+        return existing_records, skipped_ids
+
     def delete_collection(self, name: str) -> None:
         """Delete the collection named ``name`` in its entirety
         (technical-spec §3.2, §5.2, §6.5, roadmap M2-7).

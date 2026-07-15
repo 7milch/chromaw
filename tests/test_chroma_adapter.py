@@ -1153,6 +1153,65 @@ def test_delete_record_persists_across_adapter_instances(tmp_path: Path) -> None
     assert records == []
 
 
+# --- bulk_delete_records (roadmap M4-2) ---
+
+
+def test_bulk_delete_records_removes_existing_and_skips_missing(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(
+        ids=["1", "2", "3"],
+        embeddings=[[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]],
+        metadatas=[{"idx": 1}, {"idx": 2}, {"idx": 3}],
+    )
+
+    adapter = ChromaAdapter.open(tmp_path)
+    deleted, skipped = adapter.bulk_delete_records("foo", ["1", "2", "missing"])
+
+    assert sorted(r.id for r in deleted) == ["1", "2"]
+    assert skipped == ["missing"]
+
+    records, _, _ = adapter.get_records("foo")
+    assert [r.id for r in records] == ["3"]
+
+
+def test_bulk_delete_records_all_missing_deletes_nothing(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    deleted, skipped = adapter.bulk_delete_records("foo", ["missing"])
+
+    assert deleted == []
+    assert skipped == ["missing"]
+
+    records, _, _ = adapter.get_records("foo")
+    assert [r.id for r in records] == ["1"]
+
+
+def test_bulk_delete_records_duplicate_ids_deletes_once(tmp_path: Path) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1", "2"], embeddings=[[0.1, 0.2], [0.3, 0.4]])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    deleted, skipped = adapter.bulk_delete_records("foo", ["1", "1"])
+
+    assert [r.id for r in deleted] == ["1"]
+    assert skipped == []
+
+    records, _, _ = adapter.get_records("foo")
+    assert [r.id for r in records] == ["2"]
+
+
+def test_bulk_delete_records_nonexistent_collection_raises(tmp_path: Path) -> None:
+    adapter = ChromaAdapter.open(tmp_path, create=True)
+
+    with pytest.raises(CollectionNotFoundError):
+        adapter.bulk_delete_records("missing", ["1"])
+
+
 def test_delete_collection_removes_collection(tmp_path: Path) -> None:
     client = chromadb.PersistentClient(path=str(tmp_path))
     client.create_collection("foo")

@@ -97,3 +97,53 @@ export async function exportCollectionRecords(
     truncated,
   };
 }
+
+/**
+ * Exports an explicit set of record ids (M4-1 "selected export") via a
+ * single `POST .../records/get` call with `ids`, matching the field/include
+ * set used by `exportCollectionRecords` so both produce the same JSON
+ * shape. `ids` is capped at `EXPORT_MAX_RECORDS`; anything beyond that is
+ * dropped and the result is marked `truncated`.
+ */
+export async function exportSelectedRecords(
+  collectionName: string,
+  ids: string[],
+  options: { signal?: AbortSignal } = {}
+): Promise<ExportResult> {
+  const { signal } = options;
+  const truncated = ids.length > EXPORT_MAX_RECORDS;
+  const requestIds = truncated ? ids.slice(0, EXPORT_MAX_RECORDS) : ids;
+
+  const body: RecordsGetRequest = {
+    ids: requestIds,
+  };
+
+  const res = await apiFetch(
+    `/api/collections/${encodeURIComponent(collectionName)}/records/get`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    }
+  );
+
+  if (!res.ok) {
+    let detail = `request failed: ${res.status}`;
+    const payload = await res.json().catch(() => null);
+    if (payload && typeof payload.detail === "string") {
+      detail = payload.detail;
+    }
+    throw new Error(detail);
+  }
+
+  const data = (await res.json()) as RecordsResponse;
+
+  return {
+    collection: collectionName,
+    exported_at: new Date().toISOString(),
+    filters: { ids: requestIds },
+    records: data.records,
+    truncated,
+  };
+}

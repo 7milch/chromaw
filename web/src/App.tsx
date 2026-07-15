@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "./api";
 import { useAppConfig } from "./AppConfigContext";
-import { exportCollectionRecords, type ExportFilters } from "./export";
+import {
+  exportCollectionRecords,
+  exportSelectedRecords,
+  type ExportFilters,
+} from "./export";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import ConfirmNameModal from "./ConfirmNameModal";
 import DocumentEditor, { type DocumentEditorHandle } from "./DocumentEditor";
@@ -163,6 +167,15 @@ function App() {
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportTruncated, setExportTruncated] = useState(false);
   const exportAbortRef = useRef<AbortController | null>(null);
+
+  // Multi-selection for "selected export" (M4-1, technical-spec §8.3), kept
+  // independent of selectedRecordId (single-row detail selection). Cleared
+  // whenever the collection or the active search changes.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [selectedExportRunning, setSelectedExportRunning] = useState(false);
+  const [selectedExportError, setSelectedExportError] = useState<string | null>(null);
+  const [selectedExportTruncated, setSelectedExportTruncated] = useState(false);
+  const selectedExportAbortRef = useRef<AbortController | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const metadataEditorRef = useRef<MetadataEditorHandle | null>(null);
   const documentEditorRef = useRef<DocumentEditorHandle | null>(null);
@@ -197,6 +210,7 @@ function App() {
     setMatches(null);
     setMatchesError(null);
     setNResultsText(String(DEFAULT_N_RESULTS));
+    setSelectedIds(new Set());
   }, [selectedName]);
 
   // Run a similarity search (technical-spec §5.6 4, §8.4) against
@@ -426,6 +440,7 @@ function App() {
       setSearchError(null);
       setActiveSearch(null);
       setActiveSimilarityQuery({ queryText, nResults });
+      setSelectedIds(new Set());
       return;
     }
 
@@ -435,6 +450,7 @@ function App() {
       setOffset(0);
       setActiveSimilarityQuery(null);
       setActiveSearch(parsed);
+      setSelectedIds(new Set());
     } catch (err) {
       setSearchError(err instanceof Error ? err.message : String(err));
     }
@@ -448,6 +464,82 @@ function App() {
     setMatches(null);
     setMatchesError(null);
     setOffset(0);
+    setSelectedIds(new Set());
+  }
+
+  function toggleRecordSelected(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
+  function toggleSelectAllVisible() {
+    setSelectedIds((prev) => {
+      const visibleIds = records?.map((r) => r.id) ?? [];
+      const allSelected =
+        visibleIds.length > 0 && visibleIds.every((id) => prev.has(id));
+      if (allSelected) {
+        const next = new Set(prev);
+        for (const id of visibleIds) next.delete(id);
+        return next;
+      }
+      const next = new Set(prev);
+      for (const id of visibleIds) next.add(id);
+      return next;
+    });
+  }
+
+  async function startSelectedExport() {
+    if (!selectedName || selectedIds.size === 0) return;
+
+    const controller = new AbortController();
+    selectedExportAbortRef.current = controller;
+    setSelectedExportRunning(true);
+    setSelectedExportError(null);
+    setSelectedExportTruncated(false);
+
+    try {
+      const result = await exportSelectedRecords(selectedName, Array.from(selectedIds), {
+        signal: controller.signal,
+      });
+
+      const payload = {
+        collection: result.collection,
+        exported_at: result.exported_at,
+        filters: result.filters,
+        records: result.records,
+        ...(result.truncated ? { truncated: true } : {}),
+      };
+
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${result.collection}-records-selected-${result.exported_at}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      setSelectedExportTruncated(result.truncated);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        // Cancelled by the user; nothing to report.
+      } else {
+        setSelectedExportError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      selectedExportAbortRef.current = null;
+      setSelectedExportRunning(false);
+    }
   }
 
   async function startExport() {
@@ -683,6 +775,23 @@ function App() {
                         </button>
                       </>
                     )}
+                    {selectedIds.size > 0 && (
+                      <>
+                        <span className="text-xs text-slate-400">
+                          {selectedIds.size} selected
+                        </span>
+                        <button
+                          type="button"
+                          disabled={selectedExportRunning}
+                          onClick={startSelectedExport}
+                          className="rounded border border-slate-700 px-2 py-1 text-xs hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {selectedExportRunning
+                            ? "Exporting..."
+                            : `Export selected (${selectedIds.size})`}
+                        </button>
+                      </>
+                    )}
                     {exportRunning ? (
                       <>
                         <span className="text-xs text-slate-400">
@@ -715,6 +824,16 @@ function App() {
                 {!exportRunning && exportTruncated && (
                   <p className="border-t border-slate-800 px-3 py-1 text-xs text-amber-400">
                     Export truncated at 100,000 records.
+                  </p>
+                )}
+                {selectedExportError && (
+                  <p className="border-t border-slate-800 px-3 py-1 text-xs text-red-400">
+                    Export selected failed: {selectedExportError}
+                  </p>
+                )}
+                {!selectedExportRunning && selectedExportTruncated && (
+                  <p className="border-t border-slate-800 px-3 py-1 text-xs text-amber-400">
+                    Selected export truncated at 100,000 records.
                   </p>
                 )}
                 {detailOpen && (
@@ -891,6 +1010,18 @@ function App() {
                     <table className="w-full border-collapse text-sm">
                       <thead className="sticky top-0 bg-slate-900 text-xs uppercase tracking-wide text-slate-500">
                         <tr>
+                          <th className="w-8 px-3 py-2 text-left font-semibold">
+                            <input
+                              type="checkbox"
+                              aria-label="Select all visible records"
+                              checked={
+                                records.length > 0 &&
+                                records.every((r) => selectedIds.has(r.id))
+                              }
+                              onChange={toggleSelectAllVisible}
+                              className="cursor-pointer"
+                            />
+                          </th>
                           <th className="px-3 py-2 text-left font-semibold">id</th>
                           <th className="px-3 py-2 text-left font-semibold">document</th>
                           <th className="px-3 py-2 text-left font-semibold">metadata</th>
@@ -909,6 +1040,18 @@ function App() {
                               r.id === selectedRecordId ? "bg-slate-800 text-slate-50" : ""
                             }`}
                           >
+                            <td
+                              className="px-3 py-1.5 align-top"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <input
+                                type="checkbox"
+                                aria-label={`Select record ${r.id}`}
+                                checked={selectedIds.has(r.id)}
+                                onChange={() => toggleRecordSelected(r.id)}
+                                className="cursor-pointer"
+                              />
+                            </td>
                             <td className="max-w-[10rem] truncate px-3 py-1.5 align-top font-mono text-xs">
                               <span className="inline-flex items-center gap-1">
                                 {embeddingStatus(r.metadata) === "stale" && (

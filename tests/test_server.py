@@ -71,6 +71,7 @@ def test_health_read_only(tmp_path: Path, make_app, make_client) -> None:
         "version": chromaw.__version__,
         "mode": "read-only",
         "path": str(app.state.path),
+        "embedding_available": False,
     }
     assert Path(body["path"]).is_absolute()
 
@@ -88,6 +89,7 @@ def test_health_write(tmp_path: Path, make_app, make_client) -> None:
         "version": chromaw.__version__,
         "mode": "write",
         "path": str(app.state.path),
+        "embedding_available": False,
     }
     assert Path(body["path"]).is_absolute()
 
@@ -1495,6 +1497,252 @@ def test_patch_record_empty_document_is_valid(
     body = response.json()
     assert body["document"] == ""
     assert body["metadata"]["chromaw_embedding_status"] == "stale"
+
+
+def test_health_embedding_available_true_with_explicit_config(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    from chromaw.embedding import EmbeddingConfig, EmbeddingResolver
+
+    app = make_app(tmp_path, write=False)
+    app.state.adapter.embedding_resolver = EmbeddingResolver(
+        EmbeddingConfig(provider="default")
+    )
+    client = make_client(app)
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["embedding_available"] is True
+
+
+def test_patch_record_document_unknown_embedding_mode_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/0",
+        json={"document": "new text", "embedding_mode": "manual"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_patch_record_document_reembed_computes_fresh_vector_and_marks_fresh(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """embedding_mode="reembed" (roadmap M3-3): the vector changes, the
+    record is not flagged stale, and any prior stale flag is cleared."""
+    from unittest import mock
+
+    from chromaw import embedding as embedding_module
+    from chromaw.embedding import EmbeddingConfig, EmbeddingResolver
+
+    _add_records(tmp_path, "foo", 1, with_embeddings=True)
+
+    app = make_app(tmp_path, write=True)
+    app.state.adapter.embedding_resolver = EmbeddingResolver(
+        EmbeddingConfig(provider="default")
+    )
+    client = make_client(app)
+
+    before = client.post(
+        "/api/collections/foo/records/get",
+        json={"ids": ["0"], "include": ["embeddings"]},
+    ).json()["records"][0]
+
+    class _MockEF:
+        def __call__(self, input: list[str]) -> list[list[float]]:
+            return [[7.0, 7.0] for _ in input]
+
+    with mock.patch.object(
+        embedding_module, "_build_embedding_function", return_value=_MockEF()
+    ):
+        response = client.patch(
+            "/api/collections/foo/records/0",
+            json={"document": "new document text", "embedding_mode": "reembed"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["document"] == "new document text"
+    assert body["metadata"]["chromaw_embedding_status"] == "fresh"
+    assert body["metadata"]["idx"] == 0
+
+    after = client.post(
+        "/api/collections/foo/records/get",
+        json={"ids": ["0"], "include": ["embeddings"]},
+    ).json()["records"][0]
+    assert after["embedding_preview"] == pytest.approx([7.0, 7.0])
+    assert after["embedding_preview"] != before["embedding_preview"]
+
+
+def test_patch_record_document_reembed_unavailable_returns_503_and_leaves_record(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """No embedding function available for reembed: 503, and the record
+    (document/metadata/embedding) must be entirely untouched."""
+    from unittest import mock
+
+    _add_records(tmp_path, "foo", 1, with_embeddings=True)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    before = client.post(
+        "/api/collections/foo/records/get",
+        json={"ids": ["0"], "include": ["embeddings"]},
+    ).json()["records"][0]
+
+    real_collection = app.state.adapter._client.get_collection("foo")
+    real_collection._embedding_function = None
+    with mock.patch.object(
+        app.state.adapter._client, "get_collection", return_value=real_collection
+    ):
+        response = client.patch(
+            "/api/collections/foo/records/0",
+            json={"document": "new document text", "embedding_mode": "reembed"},
+        )
+
+    assert response.status_code == 503
+
+    after = client.post(
+        "/api/collections/foo/records/get",
+        json={"ids": ["0"], "include": ["embeddings"]},
+    ).json()["records"][0]
+    assert after["document"] == before["document"]
+    assert after["metadata"] == before["metadata"]
+    assert after["embedding_preview"] == before["embedding_preview"]
+
+
+def test_patch_record_embedding_mode_without_document_is_ignored(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """embedding_mode given alongside metadata but no document: there is no
+    document re-embed to gate, so embedding_mode has no effect -- the
+    request succeeds (not a validation error, since metadata alone is a
+    valid update) and no chromaw_embedding_status sentinel is written."""
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/0",
+        json={"metadata": {"tag": "reviewed"}, "embedding_mode": "reembed"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["metadata"] == {"idx": 0, "tag": "reviewed"}
+    assert "chromaw_embedding_status" not in body["metadata"]
+
+
+def test_patch_record_embedding_mode_alone_without_document_returns_422(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """embedding_mode is the *only* field given (no document/metadata/uri):
+    rejected by RecordUpdateRequest's "at least one field" guard, same as an
+    entirely empty body."""
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/0", json={"embedding_mode": "reembed"}
+    )
+
+    assert response.status_code == 422
+
+
+def test_patch_record_document_reembed_with_metadata_merges_sentinel(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """reembed + caller-supplied metadata together at the API layer: both
+    apply, and the sentinel ends up "fresh" alongside the user's metadata
+    key rather than being clobbered by it (order independence)."""
+    from unittest import mock
+
+    from chromaw import embedding as embedding_module
+    from chromaw.embedding import EmbeddingConfig, EmbeddingResolver
+
+    _add_records(tmp_path, "foo", 1, with_embeddings=True)
+
+    app = make_app(tmp_path, write=True)
+    app.state.adapter.embedding_resolver = EmbeddingResolver(
+        EmbeddingConfig(provider="default")
+    )
+    client = make_client(app)
+
+    class _MockEF:
+        def __call__(self, input: list[str]) -> list[list[float]]:
+            return [[2.0, 2.0] for _ in input]
+
+    with mock.patch.object(
+        embedding_module, "_build_embedding_function", return_value=_MockEF()
+    ):
+        response = client.patch(
+            "/api/collections/foo/records/0",
+            json={
+                "document": "new document text",
+                "embedding_mode": "reembed",
+                "metadata": {"tag": "reviewed"},
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["document"] == "new document text"
+    assert body["metadata"]["tag"] == "reviewed"
+    assert body["metadata"]["chromaw_embedding_status"] == "fresh"
+
+
+def test_patch_record_document_audit_records_embedding_mode(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/0",
+        json={"document": "new text", "embedding_mode": "keep"},
+    )
+    assert response.status_code == 200
+
+    audit_path = tmp_path / ".chromaw" / "audit.jsonl"
+    entries = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    assert entries[-1]["embedding_mode"] == "keep"
+
+
+def test_patch_record_metadata_only_with_embedding_mode_audit_records_none(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    """embedding_mode given alongside metadata but no document (ignored by
+    the handler per test_patch_record_embedding_mode_without_document_is_ignored
+    above): the audit entry must record embedding_mode as null rather than
+    echoing back the ignored "reembed"/"keep" value, since no re-embed
+    actually happened."""
+    _add_records(tmp_path, "foo", 1)
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.patch(
+        "/api/collections/foo/records/0",
+        json={"metadata": {"tag": "reviewed"}, "embedding_mode": "reembed"},
+    )
+    assert response.status_code == 200
+
+    audit_path = tmp_path / ".chromaw" / "audit.jsonl"
+    entries = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    assert entries[-1]["embedding_mode"] is None
 
 
 def test_post_diff_basic(tmp_path: Path, make_app, make_client) -> None:

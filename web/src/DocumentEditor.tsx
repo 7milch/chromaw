@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { apiFetch, fetchDiff } from "./api";
+import { useAppConfig } from "./AppConfigContext";
 import UnifiedDiffView from "./UnifiedDiffView";
 import type { RecordInfo, RecordUpdateRequest } from "./types";
 
@@ -10,24 +11,34 @@ interface DocumentEditorProps {
 }
 
 /**
- * Edit UI for a record's ``document`` (technical-spec §3.3, §5.4, §8.3).
+ * Edit UI for a record's ``document`` (technical-spec §3.3, §5.4, §8.3,
+ * roadmap M3-3).
  *
- * chromaw never recomputes embeddings, so any document edit here always
- * carries ``embedding_mode: "keep"`` and is flagged to the user as making
- * the record's vector stale relative to its (new) text before the request
- * is sent, mirroring MetadataEditor's edit -> confirm -> save flow.
+ * chromaw never recomputes embeddings implicitly, so any document edit
+ * requires the user to explicitly pick ``embedding_mode``: "Re-embed"
+ * (offered only when ``AppConfig.embeddingAvailable`` -- an explicit
+ * ``--embedding-config`` was given at startup) computes a fresh vector
+ * server-side and carries no stale warning; "Keep" leaves the vector
+ * untouched and is flagged to the user as making the record's vector stale
+ * relative to its (new) text before the request is sent. Mirrors
+ * MetadataEditor's edit -> confirm -> save flow.
  */
 export default function DocumentEditor({
   collectionName,
   record,
   onSaved,
 }: DocumentEditorProps) {
+  const { embeddingAvailable } = useAppConfig();
+
   const [editing, setEditing] = useState(false);
   const [documentText, setDocumentText] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
 
   const [confirming, setConfirming] = useState(false);
   const [pendingDocument, setPendingDocument] = useState<string | null>(null);
+  const [embeddingMode, setEmbeddingMode] = useState<"keep" | "reembed">(
+    embeddingAvailable ? "reembed" : "keep"
+  );
   // undefined = not fetched yet / in flight, null = fetch failed (fall back
   // to the char-count summary above), string = unified diff to render.
   const [diff, setDiff] = useState<string | null | undefined>(undefined);
@@ -40,6 +51,7 @@ export default function DocumentEditor({
     setDocumentText(record.document ?? "");
     setValidationError(null);
     setSaveError(null);
+    setEmbeddingMode(embeddingAvailable ? "reembed" : "keep");
     setEditing(true);
   }
 
@@ -73,7 +85,7 @@ export default function DocumentEditor({
 
     const body: RecordUpdateRequest = {
       document: pendingDocument,
-      embedding_mode: "keep",
+      embedding_mode: embeddingMode,
     };
 
     try {
@@ -175,10 +187,43 @@ export default function DocumentEditor({
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
             Confirm changes
           </p>
-          <p className="rounded bg-amber-900/60 px-2 py-1 text-xs text-amber-300">
-            ⚠️ document を更新しても embedding は再計算されません。ベクトルと本文が
-            不整合になります（stale とマークされます）。
-          </p>
+          <fieldset className="space-y-1">
+            <legend className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Embedding
+            </legend>
+            <label className="flex items-center gap-2 text-xs">
+              <input
+                type="radio"
+                name="embedding-mode"
+                value="reembed"
+                disabled={!embeddingAvailable}
+                checked={embeddingMode === "reembed"}
+                onChange={() => setEmbeddingMode("reembed")}
+              />
+              Re-embed (compute a fresh vector for the new text)
+              {!embeddingAvailable && (
+                <span className="text-slate-500">
+                  (unavailable -- restart with --embedding-config to enable)
+                </span>
+              )}
+            </label>
+            <label className="flex items-center gap-2 text-xs">
+              <input
+                type="radio"
+                name="embedding-mode"
+                value="keep"
+                checked={embeddingMode === "keep"}
+                onChange={() => setEmbeddingMode("keep")}
+              />
+              Keep existing vector (document and embedding become inconsistent)
+            </label>
+          </fieldset>
+          {embeddingMode === "keep" && (
+            <p className="rounded bg-amber-900/60 px-2 py-1 text-xs text-amber-300">
+              ⚠️ document を更新しても embedding は再計算されません。ベクトルと本文が
+              不整合になります（stale とマークされます）。
+            </p>
+          )}
           <p className="font-mono text-xs text-slate-300">
             {beforeLength} chars → {afterLength} chars (
             {lengthDelta >= 0 ? `+${lengthDelta}` : lengthDelta})

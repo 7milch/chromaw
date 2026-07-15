@@ -16,6 +16,15 @@ export interface AppConfig {
   error: string | null;
   /** Convenience flag: true once health has resolved to write mode. */
   isWriteMode: boolean;
+  /**
+   * Convenience flag (M3-3): true once health has resolved and an explicit
+   * ``--embedding-config`` is available server-side, driving whether
+   * DocumentEditor offers a "Re-embed" option. This is a conservative
+   * signal -- see ``HealthResponse.embedding_available``'s docstring
+   * (server-side) for why a collection can still support re-embedding via
+   * its own embedding function even when this is false.
+   */
+  embeddingAvailable: boolean;
 }
 
 const AppConfigContext = createContext<AppConfig | undefined>(undefined);
@@ -42,6 +51,7 @@ export function AppConfigProvider({ children }: { children: ReactNode }) {
     health,
     error,
     isWriteMode: health?.mode === "write",
+    embeddingAvailable: health?.embedding_available === true,
   };
 
   return <AppConfigContext.Provider value={value}>{children}</AppConfigContext.Provider>;

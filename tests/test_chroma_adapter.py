@@ -845,7 +845,7 @@ def test_update_record_mark_stale_without_metadata_sets_status_only(
     collection.add(ids=["1"], embeddings=[[0.1, 0.2]], metadatas=[{"a": 1}])
 
     adapter = ChromaAdapter.open(tmp_path)
-    adapter.update_record("foo", "1", document="new text", mark_stale=True)
+    adapter.update_record("foo", "1", document="new text", embedding_mode="keep")
 
     records, _, _ = adapter.get_records("foo", ids=["1"])
     assert records[0].metadata == {"a": 1, "chromaw_embedding_status": "stale"}
@@ -858,7 +858,11 @@ def test_update_record_mark_stale_merges_into_given_metadata(tmp_path: Path) -> 
 
     adapter = ChromaAdapter.open(tmp_path)
     adapter.update_record(
-        "foo", "1", document="new text", metadata={"tag": "reviewed"}, mark_stale=True
+        "foo",
+        "1",
+        document="new text",
+        metadata={"tag": "reviewed"},
+        embedding_mode="keep",
     )
 
     records, _, _ = adapter.get_records("foo", ids=["1"])
@@ -881,6 +885,227 @@ def test_update_record_no_mark_stale_leaves_metadata_untouched(tmp_path: Path) -
 
     records, _, _ = adapter.get_records("foo", ids=["1"])
     assert records[0].metadata == {"a": 1}
+
+
+# --- update_record embedding_mode="reembed" (roadmap M3-3) -----------------
+
+
+def test_update_record_reembed_uses_explicit_config(tmp_path: Path) -> None:
+    from chromaw import embedding as embedding_module
+    from chromaw.embedding import EmbeddingConfig, EmbeddingResolver
+
+    class _MockEF:
+        def __call__(self, input: list[str]) -> list[list[float]]:
+            return [[float(len(text)), 0.0] for text in input]
+
+    import unittest.mock
+
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], documents=["old"], metadatas=[{"a": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    adapter.embedding_resolver = EmbeddingResolver(EmbeddingConfig(provider="default"))
+    with unittest.mock.patch.object(
+        embedding_module, "_build_embedding_function", return_value=_MockEF()
+    ):
+        adapter.update_record("foo", "1", document="new text", embedding_mode="reembed")
+
+    records, _, _ = adapter.get_records(
+        "foo", ids=["1"], include=("documents", "metadatas", "embeddings")
+    )
+    assert records[0].document == "new text"
+    assert records[0].embedding_preview == pytest.approx([8.0, 0.0])
+    assert records[0].metadata == {"a": 1, "chromaw_embedding_status": "fresh"}
+
+
+def test_update_record_reembed_clears_prior_stale_flag(tmp_path: Path) -> None:
+    from chromaw import embedding as embedding_module
+    from chromaw.embedding import EmbeddingConfig, EmbeddingResolver
+
+    class _MockEF:
+        def __call__(self, input: list[str]) -> list[list[float]]:
+            return [[9.0, 9.0] for _ in input]
+
+    import unittest.mock
+
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], documents=["old"], metadatas=[{"a": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    adapter.update_record("foo", "1", document="mid text", embedding_mode="keep")
+    records, _, _ = adapter.get_records("foo", ids=["1"])
+    assert records[0].metadata["chromaw_embedding_status"] == "stale"
+
+    adapter.embedding_resolver = EmbeddingResolver(EmbeddingConfig(provider="default"))
+    with unittest.mock.patch.object(
+        embedding_module, "_build_embedding_function", return_value=_MockEF()
+    ):
+        adapter.update_record("foo", "1", document="final text", embedding_mode="reembed")
+
+    records, _, _ = adapter.get_records(
+        "foo", ids=["1"], include=("documents", "metadatas", "embeddings")
+    )
+    assert records[0].document == "final text"
+    assert records[0].metadata["chromaw_embedding_status"] == "fresh"
+    assert records[0].embedding_preview == pytest.approx([9.0, 9.0])
+
+
+def test_update_record_reembed_without_ef_raises_and_leaves_record_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], documents=["old"], metadatas=[{"a": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    # Force "no embedding function available" regardless of what chromadb's
+    # default local EF would otherwise resolve to: monkeypatch the client so
+    # every ``get_collection("foo")`` call inside update_record returns the
+    # *same* collection object with ``_embedding_function`` cleared (a fresh
+    # ``get_collection()`` call would otherwise re-attach chromadb's own
+    # default EF, undoing the clear).
+    real_collection = client.get_collection("foo")
+    real_collection._embedding_function = None  # type: ignore[attr-defined]
+    monkeypatch.setattr(adapter._client, "get_collection", lambda name: real_collection)
+
+    with pytest.raises(EmbeddingFunctionUnavailableError):
+        adapter.update_record("foo", "1", document="new text", embedding_mode="reembed")
+
+    records, _, _ = adapter.get_records(
+        "foo", ids=["1"], include=("documents", "metadatas", "embeddings")
+    )
+    assert records[0].document == "old"
+
+
+def test_update_record_reembed_with_user_metadata_merges_sentinel(tmp_path: Path) -> None:
+    """reembed + a caller-supplied metadata update in the same call: both
+    must apply, and the caller's metadata must not be able to clobber (or be
+    clobbered by) the chromaw_embedding_status sentinel."""
+    from chromaw import embedding as embedding_module
+    from chromaw.embedding import EmbeddingConfig, EmbeddingResolver
+
+    class _MockEF:
+        def __call__(self, input: list[str]) -> list[list[float]]:
+            return [[3.0, 4.0] for _ in input]
+
+    import unittest.mock
+
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], documents=["old"], metadatas=[{"a": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    adapter.embedding_resolver = EmbeddingResolver(EmbeddingConfig(provider="default"))
+    with unittest.mock.patch.object(
+        embedding_module, "_build_embedding_function", return_value=_MockEF()
+    ):
+        adapter.update_record(
+            "foo",
+            "1",
+            document="new text",
+            metadata={"tag": "reviewed"},
+            embedding_mode="reembed",
+        )
+
+    records, _, _ = adapter.get_records(
+        "foo", ids=["1"], include=("documents", "metadatas", "embeddings")
+    )
+    assert records[0].document == "new text"
+    assert records[0].metadata == {
+        "a": 1,
+        "tag": "reviewed",
+        "chromaw_embedding_status": "fresh",
+    }
+    assert records[0].embedding_preview == pytest.approx([3.0, 4.0])
+
+
+def test_update_record_reembed_wrong_dimension_vector_raises_and_leaves_record_unchanged(
+    tmp_path: Path,
+) -> None:
+    """A misbehaving embedding function that returns a vector whose
+    dimension doesn't match the collection's existing vectors must not
+    silently corrupt the record: chromadb rejects the mismatched
+    ``collection.update()`` call, and the document/metadata/embedding must
+    remain exactly as before (fail-closed, same guarantee as the "no EF
+    available" case above -- here the failure surfaces from chromadb itself
+    rather than from EmbeddingResolver)."""
+    from chromaw import embedding as embedding_module
+    from chromaw.embedding import EmbeddingConfig, EmbeddingResolver
+
+    class _WrongDimensionEF:
+        def __call__(self, input: list[str]) -> list[list[float]]:
+            # Collection's existing vectors are 2-dimensional; this returns 5.
+            return [[1.0, 2.0, 3.0, 4.0, 5.0] for _ in input]
+
+    import unittest.mock
+
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], documents=["old"], metadatas=[{"a": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+    adapter.embedding_resolver = EmbeddingResolver(EmbeddingConfig(provider="default"))
+    with unittest.mock.patch.object(
+        embedding_module, "_build_embedding_function", return_value=_WrongDimensionEF()
+    ):
+        with pytest.raises(Exception):
+            adapter.update_record(
+                "foo", "1", document="new text", embedding_mode="reembed"
+            )
+
+    records, _, _ = adapter.get_records(
+        "foo", ids=["1"], include=("documents", "metadatas", "embeddings")
+    )
+    assert records[0].document == "old"
+    assert records[0].metadata == {"a": 1}
+    assert records[0].embedding_preview == pytest.approx([0.1, 0.2])
+
+
+def test_update_record_stale_then_keep_then_reembed_flow(tmp_path: Path) -> None:
+    """A record that goes stale -> keep (still stale) -> reembed ends up
+    fresh with the final document's vector, exercising the full lifecycle in
+    one continuous flow rather than each transition in isolation."""
+    from chromaw import embedding as embedding_module
+    from chromaw.embedding import EmbeddingConfig, EmbeddingResolver
+
+    class _MockEF:
+        def __call__(self, input: list[str]) -> list[list[float]]:
+            return [[5.0, 5.0] for _ in input]
+
+    import unittest.mock
+
+    client = chromadb.PersistentClient(path=str(tmp_path))
+    collection = client.create_collection("foo")
+    collection.add(ids=["1"], embeddings=[[0.1, 0.2]], documents=["v1"], metadatas=[{"a": 1}])
+
+    adapter = ChromaAdapter.open(tmp_path)
+
+    # v1 -> v2, keep: goes stale.
+    adapter.update_record("foo", "1", document="v2", embedding_mode="keep")
+    records, _, _ = adapter.get_records("foo", ids=["1"])
+    assert records[0].metadata["chromaw_embedding_status"] == "stale"
+
+    # v2 -> v3, keep again: still stale.
+    adapter.update_record("foo", "1", document="v3", embedding_mode="keep")
+    records, _, _ = adapter.get_records("foo", ids=["1"])
+    assert records[0].document == "v3"
+    assert records[0].metadata["chromaw_embedding_status"] == "stale"
+
+    # v3 -> v4, reembed: fresh again, with a new vector for v4.
+    adapter.embedding_resolver = EmbeddingResolver(EmbeddingConfig(provider="default"))
+    with unittest.mock.patch.object(
+        embedding_module, "_build_embedding_function", return_value=_MockEF()
+    ):
+        adapter.update_record("foo", "1", document="v4", embedding_mode="reembed")
+
+    records, _, _ = adapter.get_records(
+        "foo", ids=["1"], include=("documents", "metadatas", "embeddings")
+    )
+    assert records[0].document == "v4"
+    assert records[0].metadata["chromaw_embedding_status"] == "fresh"
+    assert records[0].embedding_preview == pytest.approx([5.0, 5.0])
 
 
 # --- delete_record / delete_collection / update_collection (roadmap M2-7) ---

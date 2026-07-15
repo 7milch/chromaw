@@ -48,6 +48,7 @@ class AuditLogger:
         record_id: str,
         changes: dict[str, dict[str, Any]],
         embedding_stale: bool,
+        embedding_mode: str | None = None,
     ) -> None:
         """Append a ``record.update`` entry for a single PATCH operation.
 
@@ -55,6 +56,12 @@ class AuditLogger:
         ``document``) to ``{"before": ..., "after": ...}``. Only fields that
         were actually part of the request should be included -- untouched
         fields are omitted entirely rather than recorded as a no-op change.
+
+        ``embedding_mode`` (M3-3) records the caller's requested mode
+        (``"keep"``/``"reembed"``) verbatim when a ``document`` update was
+        involved, ``None`` otherwise (e.g. a metadata/uri-only PATCH) --
+        distinct from ``embedding_stale``, which is the *resulting* stale
+        status of the record's vector.
         """
 
         entry = {
@@ -64,6 +71,7 @@ class AuditLogger:
             "id": record_id,
             "changes": changes,
             "embedding_stale": embedding_stale,
+            "embedding_mode": embedding_mode,
             "user_agent": f"chromaw/{__version__}",
         }
         self._append(entry)

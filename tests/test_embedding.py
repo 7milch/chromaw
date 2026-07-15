@@ -475,3 +475,66 @@ def test_query_records_without_config_falls_back_to_chromadb(tmp_path: Path) -> 
         adapter.query_records("docs", query_text="hi", n_results=1)
     except EmbeddingFunctionUnavailableError:
         pass
+
+
+# --- EmbeddingResolver.embed_document (M3-3) --------------------------------
+
+
+class _FakeCollection:
+    """Stand-in for a chromadb Collection exposing ``_embedding_function``,
+    the private attribute ``embed_document`` reads for tier 2 (no explicit
+    ``--embedding-config``, fall back to the collection's own EF)."""
+
+    def __init__(self, ef: Any | None) -> None:
+        self._embedding_function = ef
+
+
+def test_embed_document_uses_explicit_config_over_collection_ef(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_ef = _MockEmbeddingFunction(dimension=2)
+    monkeypatch.setattr(
+        embedding_module, "_build_embedding_function", lambda config: mock_ef
+    )
+    resolver = EmbeddingResolver(EmbeddingConfig(provider="default"))
+    collection_ef = _MockEmbeddingFunction(dimension=5)
+
+    vector = resolver.embed_document("hello", collection=_FakeCollection(collection_ef))
+
+    assert vector == [5.0, 5.0]
+    assert mock_ef.calls == ["hello"]
+    assert collection_ef.calls == []
+
+
+def test_embed_document_without_explicit_config_uses_collection_ef() -> None:
+    resolver = EmbeddingResolver()
+    collection_ef = _MockEmbeddingFunction(dimension=3)
+
+    vector = resolver.embed_document("hi", collection=_FakeCollection(collection_ef))
+
+    assert vector == [2.0, 2.0, 2.0]
+    assert collection_ef.calls == ["hi"]
+
+
+def test_embed_document_no_config_no_collection_ef_raises() -> None:
+    resolver = EmbeddingResolver()
+
+    with pytest.raises(EmbeddingFunctionUnavailableError, match="--embedding-config"):
+        resolver.embed_document("hi", collection=_FakeCollection(None))
+
+
+def test_embed_document_no_config_no_collection_raises() -> None:
+    resolver = EmbeddingResolver()
+
+    with pytest.raises(EmbeddingFunctionUnavailableError):
+        resolver.embed_document("hi", collection=None)
+
+
+def test_embed_document_collection_ef_failure_raises_unavailable() -> None:
+    resolver = EmbeddingResolver()
+
+    def _broken(_: list[str]) -> list[list[float]]:
+        raise RuntimeError("model crashed")
+
+    with pytest.raises(EmbeddingFunctionUnavailableError, match="model crashed"):
+        resolver.embed_document("hi", collection=_FakeCollection(_broken))

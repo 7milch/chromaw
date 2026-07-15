@@ -246,26 +246,98 @@ class EmbeddingResolver:
                 '"api_key_env": "OPENAI_API_KEY"} to enable text search.'
             )
 
+        ef = self._get_explicit_embedding_function()
+        return self._run_embedding_function(
+            ef, text, label=f"provider={self._config.provider!r}"
+        )
+
+    def embed_document(self, text: str, *, collection: Any = None) -> list[float]:
+        """Embed ``text`` for a document re-embed (technical-spec §3.3,
+        roadmap M3-3), used by ``ChromaAdapter.update_record`` when
+        ``embedding_mode="reembed"``.
+
+        Resolution priority mirrors ``embed_query``/``query_records``
+        (technical-spec §5.6 4), minus tier 3 (chromadb's default embedding
+        function is only reachable from inside ``collection.query()``/
+        ``collection.add()`` themselves, not via a standalone call chromaw
+        can invoke up front to fail closed before writing):
+
+        1. An explicit ``--embedding-config`` (``has_explicit_config``), if
+           given -- always wins, same as ``embed_query``.
+        2. Otherwise, the collection's own configured embedding function --
+           read off ``collection._embedding_function``, the same attribute
+           chromadb's own ``Collection.query``/``.add`` use internally. This
+           is best-effort: chromadb does not expose a public API for "give
+           me this collection's embedding function", so this reaches into a
+           private attribute. If it is missing or ``None`` (e.g. an older
+           chromadb version, or a collection with no embedding function of
+           its own), re-embedding is simply unavailable via this tier.
+
+        Embedding is attempted *before* ``collection.update()`` is called,
+        so a failure here leaves the record entirely unmodified (technical-
+        spec §3.1 "fail closed") -- callers must call this ahead of the
+        actual update, not after.
+
+        Raises:
+            EmbeddingFunctionUnavailableError: no explicit config is set and
+                the collection has no usable embedding function of its own,
+                or the resolved embedding function fails to build/run.
+        """
+        if self.has_explicit_config:
+            ef = self._get_explicit_embedding_function()
+            assert self._config is not None
+            return self._run_embedding_function(
+                ef, text, label=f"provider={self._config.provider!r}"
+            )
+
+        ef = getattr(collection, "_embedding_function", None) if collection is not None else None
+        if ef is None:
+            raise EmbeddingFunctionUnavailableError(
+                "no embedding function available to re-embed this document: "
+                "no --embedding-config was given, and the collection has no "
+                "embedding function of its own. Pass --embedding-config "
+                "pointing at a JSON file such as "
+                '{"provider": "openai", "model": "text-embedding-3-small", '
+                '"api_key_env": "OPENAI_API_KEY"} to enable re-embedding.'
+            )
+        return self._run_embedding_function(
+            ef, text, label="the collection's configured embedding function"
+        )
+
+    def _get_explicit_embedding_function(self) -> Any:
+        """Build (and cache) the embedding function for ``self._config``.
+
+        Only meaningful when ``self._config`` is not ``None``; callers must
+        check ``has_explicit_config`` first.
+        """
         if self._embedding_function is None:
+            assert self._config is not None
             try:
                 self._embedding_function = _build_embedding_function(self._config)
             except EmbeddingConfigError as exc:
                 raise EmbeddingFunctionUnavailableError(str(exc)) from exc
+        return self._embedding_function
 
+    @staticmethod
+    def _run_embedding_function(ef: Any, text: str, *, label: str) -> list[float]:
+        """Run ``ef([text])`` and return the resulting vector as
+        ``list[float]``, reclassifying any failure as
+        ``EmbeddingFunctionUnavailableError``. Shared by ``embed_query`` and
+        ``embed_document``.
+        """
         try:
-            result = self._embedding_function([text])
+            result = ef([text])
         except Exception as exc:
             raise EmbeddingFunctionUnavailableError(
-                f"embedding function (provider={self._config.provider!r}) "
-                f"failed to embed the query text: {exc}"
+                f"embedding function ({label}) failed to embed the text: {exc}"
             ) from exc
 
         try:
             vector = list(result[0])
         except (IndexError, TypeError, KeyError) as exc:
             raise EmbeddingFunctionUnavailableError(
-                f"embedding function (provider={self._config.provider!r}) "
-                f"returned an unexpected result shape: {result!r}"
+                f"embedding function ({label}) returned an unexpected result "
+                f"shape: {result!r}"
             ) from exc
 
         return [float(v) for v in vector]

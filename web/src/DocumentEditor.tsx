@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { forwardRef, useImperativeHandle, useState } from "react";
+import type { ForwardedRef } from "react";
 import { apiFetch, fetchDiff } from "./api";
 import { useAppConfig } from "./AppConfigContext";
 import UnifiedDiffView from "./UnifiedDiffView";
@@ -8,6 +9,10 @@ interface DocumentEditorProps {
   collectionName: string;
   record: RecordInfo;
   onSaved: () => void;
+}
+
+export interface DocumentEditorHandle {
+  startEdit: () => void;
 }
 
 /**
@@ -23,11 +28,10 @@ interface DocumentEditorProps {
  * relative to its (new) text before the request is sent. Mirrors
  * MetadataEditor's edit -> confirm -> save flow.
  */
-export default function DocumentEditor({
-  collectionName,
-  record,
-  onSaved,
-}: DocumentEditorProps) {
+function DocumentEditor(
+  { collectionName, record, onSaved }: DocumentEditorProps,
+  ref: ForwardedRef<DocumentEditorHandle>
+) {
   const { embeddingAvailable } = useAppConfig();
 
   const [editing, setEditing] = useState(false);
@@ -54,6 +58,8 @@ export default function DocumentEditor({
     setEmbeddingMode(embeddingAvailable ? "reembed" : "keep");
     setEditing(true);
   }
+
+  useImperativeHandle(ref, () => ({ startEdit }));
 
   function cancelEdit() {
     setEditing(false);
@@ -267,3 +273,5 @@ export default function DocumentEditor({
     </div>
   );
 }
+
+export default forwardRef(DocumentEditor);

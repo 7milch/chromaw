@@ -46,7 +46,7 @@
 - [x] M3-1: query API と UI (Issue #23)
 - [x] M3-2: `--embedding-config` と解決優先順位 (Issue #24)
 - [x] M3-3: document edit + re-embed (Issue #25)
-- [ ] M3-4: stale フラグ表示
+- [x] M3-4: stale フラグ表示 (Issue #26)
 
 ## Milestone 4: Bulk / import-export
 

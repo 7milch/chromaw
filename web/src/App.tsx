@@ -4,7 +4,7 @@ import { useAppConfig } from "./AppConfigContext";
 import { exportCollectionRecords, type ExportFilters } from "./export";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import ConfirmNameModal from "./ConfirmNameModal";
-import DocumentEditor from "./DocumentEditor";
+import DocumentEditor, { type DocumentEditorHandle } from "./DocumentEditor";
 import MetadataEditor, { type MetadataEditorHandle } from "./MetadataEditor";
 import RenameCollectionModal from "./RenameCollectionModal";
 import ShortcutsHelpModal from "./ShortcutsHelpModal";
@@ -90,6 +90,18 @@ function formatMetadataJson(metadata: Record<string, unknown> | null): string {
 
 const PAGE_LIMIT = 50;
 
+/**
+ * Read the ``chromaw_embedding_status`` metadata flag set by document edits
+ * (DocumentEditor's "keep" mode / M2-3, M3-3) so the UI can surface a stale
+ * warning without the caller needing to know the metadata key.
+ */
+function embeddingStatus(
+  metadata: Record<string, unknown> | null
+): "stale" | "fresh" | null {
+  const value = metadata?.chromaw_embedding_status;
+  return value === "stale" || value === "fresh" ? value : null;
+}
+
 function summarizeMetadata(metadata: Record<string, unknown> | null): string {
   if (!metadata) return "-";
   const entries = Object.entries(metadata);
@@ -98,7 +110,7 @@ function summarizeMetadata(metadata: Record<string, unknown> | null): string {
 }
 
 function App() {
-  const { health, error: healthError, isWriteMode } = useAppConfig();
+  const { health, error: healthError, isWriteMode, embeddingAvailable } = useAppConfig();
   const [collections, setCollections] = useState<CollectionInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedName, setSelectedName] = useState<string | null>(null);
@@ -153,6 +165,7 @@ function App() {
   const exportAbortRef = useRef<AbortController | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const metadataEditorRef = useRef<MetadataEditorHandle | null>(null);
+  const documentEditorRef = useRef<DocumentEditorHandle | null>(null);
   const recordRowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
 
   useEffect(() => {
@@ -827,7 +840,17 @@ function App() {
                               }`}
                             >
                               <td className="max-w-[10rem] truncate px-3 py-1.5 align-top font-mono text-xs">
-                                {m.id}
+                                <span className="inline-flex items-center gap-1">
+                                  {embeddingStatus(m.metadata) === "stale" && (
+                                    <span
+                                      title="document / embedding が不整合の可能性があります (stale)"
+                                      className="shrink-0 rounded bg-amber-900/60 px-1 text-[10px] font-sans font-semibold text-amber-300"
+                                    >
+                                      ⚠ stale
+                                    </span>
+                                  )}
+                                  {m.id}
+                                </span>
                               </td>
                               <td className="px-3 py-1.5 align-top font-mono text-xs text-slate-400">
                                 {m.distance !== null ? m.distance.toFixed(4) : "-"}
@@ -887,7 +910,17 @@ function App() {
                             }`}
                           >
                             <td className="max-w-[10rem] truncate px-3 py-1.5 align-top font-mono text-xs">
-                              {r.id}
+                              <span className="inline-flex items-center gap-1">
+                                {embeddingStatus(r.metadata) === "stale" && (
+                                  <span
+                                    title="document / embedding が不整合の可能性があります (stale)"
+                                    className="shrink-0 rounded bg-amber-900/60 px-1 text-[10px] font-sans font-semibold text-amber-300"
+                                  >
+                                    ⚠ stale
+                                  </span>
+                                )}
+                                {r.id}
+                              </span>
                             </td>
                             <td className="max-w-xs truncate px-3 py-1.5 align-top">
                               {r.document ?? "-"}
@@ -991,8 +1024,44 @@ function App() {
                 </code>
               </div>
 
+              {(() => {
+                const status = embeddingStatus(detailRecord.metadata);
+                if (!status) return null;
+                return (
+                  <div>
+                    {status === "stale" ? (
+                      <div className="space-y-1 rounded border border-amber-800 bg-amber-900/40 px-2 py-1.5">
+                        <p className="text-xs font-semibold text-amber-300">
+                          ⚠ stale: document が embedding と不整合の可能性があります
+                        </p>
+                        <p className="text-xs text-amber-200/80">
+                          Re-embed で解消できます。
+                          {isWriteMode && embeddingAvailable && (
+                            <>
+                              {" "}
+                              <button
+                                type="button"
+                                onClick={() => documentEditorRef.current?.startEdit()}
+                                className="rounded border border-amber-700 px-1.5 py-0.5 text-xs text-amber-200 hover:bg-amber-900/60"
+                              >
+                                Document を編集して Re-embed
+                              </button>
+                            </>
+                          )}
+                        </p>
+                      </div>
+                    ) : (
+                      <span className="inline-block rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-400 ring-1 ring-slate-700">
+                        fresh
+                      </span>
+                    )}
+                  </div>
+                );
+              })()}
+
               {isWriteMode ? (
                 <DocumentEditor
+                  ref={documentEditorRef}
                   collectionName={selectedName!}
                   record={detailRecord}
                   onSaved={() => setRefreshTick((t) => t + 1)}

@@ -59,7 +59,7 @@
 ## Release
 
 - [x] R-1: wheel packaging（static 同梱、Node.js 不要であることの検証） (Issue #33)
-- [ ] R-2: pipx / uvx 動作確認
+- [x] R-2: pipx / uvx 動作確認 (Issue #34)
 - [ ] R-3: PyPI 公開
 
 ---

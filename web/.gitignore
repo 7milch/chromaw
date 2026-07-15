@@ -1,3 +1,9 @@
 *.tsbuildinfo
 dist/
 node_modules/
+
+# Playwright e2e artifacts
+/test-results/
+/playwright-report/
+/blob-report/
+e2e/.server-info.json

@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import chromadb
 import pytest
 
 import chromaw
@@ -3050,3 +3051,429 @@ def test_query_include_without_embeddings_leaves_embedding_fields_null(
     for match in response.json()["matches"]:
         assert match["embedding_dimension"] is None
         assert match["embedding_preview"] is None
+
+
+# --- JSONL import/export (roadmap M4-3, technical-spec §8) ---------------
+
+
+def test_export_jsonl_round_trips_into_new_collection(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 3, with_embeddings=True)
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("bar")
+
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    export_response = client.get("/api/collections/foo/export.jsonl")
+    assert export_response.status_code == 200
+    assert export_response.headers["content-type"].startswith("application/x-ndjson")
+    assert 'filename="foo.jsonl"' in export_response.headers["content-disposition"]
+
+    exported_lines = export_response.text.strip().splitlines()
+    assert len(exported_lines) == 3
+
+    import_response = client.post(
+        "/api/collections/bar/import",
+        files={"file": ("export.jsonl", "\n".join(exported_lines))},
+    )
+    assert import_response.status_code == 200
+    import_body = import_response.json()
+    assert sorted(import_body["imported"]) == ["0", "1", "2"]
+    assert import_body["skipped"] == []
+
+    original = client.post(
+        "/api/collections/foo/records/get",
+        json={"include": ["documents", "metadatas", "uris", "embeddings"]},
+    ).json()["records"]
+    reimported = client.post(
+        "/api/collections/bar/records/get",
+        json={"include": ["documents", "metadatas", "uris", "embeddings"]},
+    ).json()["records"]
+
+    def _by_id(records):
+        return {r["id"]: r for r in records}
+
+    original_by_id = _by_id(original)
+    reimported_by_id = _by_id(reimported)
+    assert set(original_by_id) == set(reimported_by_id)
+    for record_id, before in original_by_id.items():
+        after = reimported_by_id[record_id]
+        assert after["document"] == before["document"]
+        assert after["metadata"] == before["metadata"]
+        assert after["uri"] == before["uri"]
+        assert after["embedding_dimension"] == before["embedding_dimension"]
+        assert after["embedding_preview"] == before["embedding_preview"]
+
+
+def test_export_jsonl_nonexistent_collection_returns_404(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/missing/export.jsonl")
+
+    assert response.status_code == 404
+
+
+def test_export_jsonl_read_only_allowed(tmp_path: Path, make_app, make_client) -> None:
+    _add_records(tmp_path, "foo", 1, with_embeddings=True)
+    app = make_app(tmp_path, write=False)
+    client = make_client(app)
+
+    response = client.get("/api/collections/foo/export.jsonl")
+
+    assert response.status_code == 200
+
+
+def test_import_invalid_lines_are_skipped_with_line_numbers(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    body = "\n".join(
+        [
+            "not valid json",
+            json.dumps({"no_id": True}),
+            json.dumps({"id": ""}),
+            json.dumps({"id": "dup", "document": "dup doc"}),
+            json.dumps({"id": "dup", "document": "dup doc again"}),
+            json.dumps({"id": "ok", "document": "hello"}),
+        ]
+    )
+
+    response = client.post(
+        "/api/collections/foo/import", files={"file": ("bad.jsonl", body)}
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["imported"] == ["dup", "ok"]
+    skipped_lines = {s["line"]: s["reason"] for s in result["skipped"]}
+    assert set(skipped_lines) == {1, 2, 3, 5}
+    assert "invalid JSON" in skipped_lines[1]
+    assert "id" in skipped_lines[2]
+    assert "id" in skipped_lines[3]
+    assert "duplicate id" in skipped_lines[5]
+
+
+def test_import_mode_add_duplicate_existing_id_is_skipped(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1, with_embeddings=True)
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    body = json.dumps({"id": "0", "document": "new doc", "embedding": [1.0, 2.0]})
+    response = client.post(
+        "/api/collections/foo/import",
+        files={"file": ("dup.jsonl", body)},
+        data={"mode": "add"},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["imported"] == []
+    assert len(result["skipped"]) == 1
+    assert "already exists" in result["skipped"][0]["reason"]
+
+    records = client.post(
+        "/api/collections/foo/records/get", json={"ids": ["0"]}
+    ).json()["records"]
+    assert records[0]["document"] == "doc-0"
+
+
+def test_import_mode_upsert_overwrites_existing_id(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    _add_records(tmp_path, "foo", 1, with_embeddings=True)
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    body = json.dumps({"id": "0", "document": "overwritten", "embedding": [9.0, 9.0]})
+    response = client.post(
+        "/api/collections/foo/import",
+        files={"file": ("upsert.jsonl", body)},
+        data={"mode": "upsert"},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["imported"] == ["0"]
+    assert result["skipped"] == []
+
+    records = client.post(
+        "/api/collections/foo/records/get",
+        json={"ids": ["0"], "include": ["documents", "embeddings"]},
+    ).json()["records"]
+    assert records[0]["document"] == "overwritten"
+    assert records[0]["embedding_preview"] == [9.0, 9.0]
+
+
+def test_import_read_only_returns_403(tmp_path: Path, make_app, make_client) -> None:
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    app = make_app(tmp_path, write=False)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/import",
+        files={"file": ("x.jsonl", json.dumps({"id": "a"}))},
+    )
+
+    assert response.status_code == 403
+
+
+def test_import_without_token_returns_401(tmp_path: Path, make_app, make_client) -> None:
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    app = make_app(tmp_path, write=True)
+    client = make_client(app, token=None)
+
+    response = client.post(
+        "/api/collections/foo/import",
+        files={"file": ("x.jsonl", json.dumps({"id": "a"}))},
+    )
+
+    assert response.status_code == 401
+
+
+def test_import_nonexistent_collection_returns_404(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/missing/import",
+        files={"file": ("x.jsonl", json.dumps({"id": "a"}))},
+    )
+
+    assert response.status_code == 404
+
+
+def test_import_invalid_mode_returns_422(tmp_path: Path, make_app, make_client) -> None:
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post(
+        "/api/collections/foo/import",
+        files={"file": ("x.jsonl", json.dumps({"id": "a"}))},
+        data={"mode": "bogus"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_import_writes_audit_entry(tmp_path: Path, make_app, make_client) -> None:
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    body = "\n".join(
+        [json.dumps({"id": "a", "document": "hello"}), "not json"]
+    )
+    response = client.post("/api/collections/foo/import", files={"file": ("x.jsonl", body)})
+    assert response.status_code == 200
+
+    audit_path = tmp_path / ".chromaw" / "audit.jsonl"
+    lines = audit_path.read_text(encoding="utf-8").strip().splitlines()
+    entries = [json.loads(line) for line in lines]
+    import_entries = [e for e in entries if e["operation"] == "record.import"]
+    assert len(import_entries) == 1
+    entry = import_entries[0]
+    assert entry["collection"] == "foo"
+    assert entry["mode"] == "add"
+    assert entry["imported"] == ["a"]
+    assert len(entry["skipped"]) == 1
+
+
+def test_import_empty_file_returns_empty_result(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    response = client.post("/api/collections/foo/import", files={"file": ("empty.jsonl", "")})
+
+    assert response.status_code == 200
+    assert response.json() == {"imported": [], "skipped": []}
+
+
+def test_import_huge_line_and_japanese_content(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    huge_document = "x" * 200_000
+    japanese_document = "こんにちは世界、これはテストのドキュメントです。"
+    body = "\n".join(
+        [
+            json.dumps({"id": "huge", "document": huge_document}),
+            json.dumps(
+                {
+                    "id": "jp",
+                    "document": japanese_document,
+                    "metadata": {"note": "日本語のメタデータ"},
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+
+    response = client.post("/api/collections/foo/import", files={"file": ("big.jsonl", body)})
+
+    assert response.status_code == 200
+    result = response.json()
+    assert sorted(result["imported"]) == ["huge", "jp"]
+    assert result["skipped"] == []
+
+    records = client.post(
+        "/api/collections/foo/records/get", json={"ids": ["huge", "jp"]}
+    ).json()["records"]
+    by_id = {r["id"]: r for r in records}
+    assert by_id["huge"]["document"] == huge_document
+    assert by_id["jp"]["document"] == japanese_document
+    assert by_id["jp"]["metadata"]["note"] == "日本語のメタデータ"
+
+
+def test_export_jsonl_empty_collection_returns_empty_body(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("empty")
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/empty/export.jsonl")
+
+    assert response.status_code == 200
+    assert response.text == ""
+
+
+def test_export_jsonl_crosses_batch_boundary(tmp_path: Path, make_app, make_client) -> None:
+    # _EXPORT_BATCH_SIZE is 500; use a count that spans several full pages
+    # plus a partial final page, to catch off-by-one errors in the
+    # iter_records offset loop (e.g. an id silently dropped/duplicated at a
+    # page boundary).
+    _add_records(tmp_path, "foo", 1201, with_embeddings=True)
+    app = make_app(tmp_path)
+    client = make_client(app)
+
+    response = client.get("/api/collections/foo/export.jsonl")
+
+    assert response.status_code == 200
+    lines = response.text.strip().splitlines()
+    ids = [json.loads(line)["id"] for line in lines]
+    assert len(ids) == 1201
+    assert len(set(ids)) == 1201
+    assert sorted(ids, key=int) == [str(i) for i in range(1201)]
+
+
+def test_import_crlf_line_endings_are_parsed(tmp_path: Path, make_app, make_client) -> None:
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    body = "\r\n".join(
+        [json.dumps({"id": "a", "document": "d1"}), json.dumps({"id": "b", "document": "d2"})]
+    )
+
+    response = client.post("/api/collections/foo/import", files={"file": ("crlf.jsonl", body)})
+
+    assert response.status_code == 200
+    result = response.json()
+    assert sorted(result["imported"]) == ["a", "b"]
+    assert result["skipped"] == []
+
+
+def test_import_utf8_bom_first_line_is_stripped_and_imported(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    # A UTF-8 BOM is prepended to the file; post_import strips it before
+    # parsing, so the BOM'd first line is imported normally rather than
+    # being reported as an invalid-JSON skip.
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    body = ("﻿" + json.dumps({"id": "a", "document": "d1"}) + "\n").encode("utf-8")
+    body += json.dumps({"id": "b", "document": "d2"}).encode("utf-8")
+
+    response = client.post("/api/collections/foo/import", files={"file": ("bom.jsonl", body)})
+
+    assert response.status_code == 200
+    result = response.json()
+    assert sorted(result["imported"]) == ["a", "b"]
+    assert result["skipped"] == []
+
+
+def test_import_embedding_dimension_mismatch_reported_as_skip(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    # First row establishes the collection's embedding dimension (2); a
+    # later row with a different dimension must be reported as a
+    # line-numbered skip via the adapter's batch-write failure path, not an
+    # unhandled 500.
+    _add_records(tmp_path, "foo", 1, with_embeddings=True)
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    body = json.dumps({"id": "mismatched", "document": "x", "embedding": [1.0, 2.0, 3.0]})
+    response = client.post("/api/collections/foo/import", files={"file": ("dim.jsonl", body)})
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["imported"] == []
+    assert len(result["skipped"]) == 1
+    assert result["skipped"][0]["line"] == 1
+
+
+def test_import_non_dict_metadata_string_is_skipped(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    body = json.dumps({"id": "a", "document": "x", "metadata": "not-a-dict"})
+    response = client.post("/api/collections/foo/import", files={"file": ("meta.jsonl", body)})
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["imported"] == []
+    assert len(result["skipped"]) == 1
+    assert "'metadata' must be an object" in result["skipped"][0]["reason"]
+
+
+def test_import_blank_lines_are_ignored_not_reported_as_skips(
+    tmp_path: Path, make_app, make_client
+) -> None:
+    client_lib = chromadb.PersistentClient(path=str(tmp_path))
+    client_lib.create_collection("foo")
+    app = make_app(tmp_path, write=True)
+    client = make_client(app)
+
+    body = "\n\n   \n" + json.dumps({"id": "a", "document": "x"}) + "\n\n"
+    response = client.post("/api/collections/foo/import", files={"file": ("blank.jsonl", body)})
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["imported"] == ["a"]
+    assert result["skipped"] == []

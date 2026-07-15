@@ -318,6 +318,38 @@ class DeleteResponse(BaseModel):
     id: str
 
 
+class ImportSkip(BaseModel):
+    """A single skipped row from ``POST /api/collections/{name}/import``
+    (roadmap M4-3, technical-spec §8).
+
+    ``line`` is the 1-indexed line number within the uploaded JSONL body
+    (blank lines are still counted towards the line number, matching
+    ``ImportEntry.line`` -- they are just never themselves reported as a
+    skip, since they carry no content to fail parsing). ``reason``
+    covers both parse-level skips (invalid JSON, missing/invalid ``id``,
+    duplicate ``id`` within the file) and adapter-level ones (``id`` already
+    exists under ``mode="add"``, or the underlying chromadb write failed).
+    """
+
+    line: int
+    reason: str
+
+
+class ImportResponse(BaseModel):
+    """Response body for ``POST /api/collections/{name}/import`` (roadmap
+    M4-3, technical-spec §8).
+
+    Always a 200 -- even a file where every row was skipped is a
+    successfully processed (if unproductive) import request, not a client
+    error. ``imported`` lists the ids actually written, in file order;
+    ``skipped`` lists every row that wasn't, with a line number and reason
+    each.
+    """
+
+    imported: list[str]
+    skipped: list[ImportSkip]
+
+
 class DiffRequest(BaseModel):
     """Request body for ``POST /api/diff`` (technical-spec §8, M2-4).
 

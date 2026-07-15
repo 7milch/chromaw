@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,29 @@ from chromaw.errors import (
 from chromaw.models import CollectionInfo, RecordInfo, RecordMatchInfo
 
 _SQLITE_FILENAME = "chroma.sqlite3"
+_DEFAULT_MAX_BATCH_SIZE = 1000
+
+
+@dataclass
+class ImportEntry:
+    """A single parsed JSONL import row (roadmap M4-3, technical-spec §8).
+
+    Produced by the API layer's line-by-line parsing of the uploaded JSONL
+    body (``POST .../import``) -- everything id/JSON-shape related has
+    already been validated by the time an ``ImportEntry`` reaches
+    ``ChromaAdapter.import_records``; ``line`` (1-indexed, matching the
+    uploaded file) is carried along purely so adapter-level failures (e.g. a
+    ``collection.add()``/``collection.upsert()`` call rejected by chromadb)
+    can still be reported back to the caller as a line-numbered skip, the
+    same shape as a parse-level skip.
+    """
+
+    line: int
+    id: str
+    document: str | None = None
+    metadata: dict[str, Any] | None = None
+    uri: str | None = None
+    embedding: list[float] | None = None
 
 
 @dataclass
@@ -743,4 +767,205 @@ class ChromaAdapter:
             metadata=collection.metadata,
             dimension=dimension,
         )
+
+    def iter_records(
+        self, name: str, *, batch_size: int = 500
+    ) -> Iterator[dict[str, Any]]:
+        """Yield every record of the collection named ``name``, one dict at
+        a time, for JSONL export (roadmap M4-3, technical-spec §8).
+
+        Unlike ``get_records``, this fetches records in fixed-size
+        ``batch_size`` pages via an internal offset loop and yields them one
+        by one, so memory use stays bounded to a single batch regardless of
+        collection size -- callers (the ``GET .../export.jsonl`` streaming
+        endpoint) can stream the response without holding the whole
+        collection in memory. It also deliberately bypasses ``RecordInfo``'s
+        ``embedding_preview`` truncation (first 8 values only): each yielded
+        dict's ``"embedding"`` is the record's *full* vector, since a
+        round-trippable export/import needs the complete embedding, not a
+        preview.
+
+        Each yielded dict has keys ``id``, ``document``, ``metadata``,
+        ``uri``, ``embedding`` (``list[float] | None``) -- the same fields
+        ``import_records``/``ImportEntry`` expect, so an export produced by
+        this method can be fed straight back through ``POST .../import``.
+
+        Raises:
+            CollectionNotFoundError: no collection named ``name`` exists.
+        """
+        try:
+            collection = self._client.get_collection(name)
+        except Exception as exc:
+            raise CollectionNotFoundError(f"collection not found: {name}") from exc
+
+        include = ["documents", "metadatas", "uris", "embeddings"]
+        offset = 0
+        while True:
+            try:
+                result = collection.get(limit=batch_size, offset=offset, include=include)
+            except (ValueError, TypeError, ChromaError):
+                # Defensive fallback, mirroring get_records: some chromadb
+                # versions reject "uris" in collection.get().
+                fallback_include = [item for item in include if item != "uris"]
+                result = collection.get(
+                    limit=batch_size, offset=offset, include=fallback_include
+                )
+
+            ids = result.get("ids") or []
+            if not ids:
+                break
+
+            documents = result.get("documents")
+            metadatas = result.get("metadatas")
+            uris = result.get("uris")
+            embeddings = result.get("embeddings")
+
+            for i, record_id in enumerate(ids):
+                embedding: list[float] | None = None
+                if embeddings is not None and embeddings[i] is not None:
+                    embedding = [float(v) for v in embeddings[i]]
+                yield {
+                    "id": str(record_id),
+                    "document": documents[i] if documents is not None else None,
+                    "metadata": metadatas[i] if metadatas is not None else None,
+                    "uri": uris[i] if uris is not None else None,
+                    "embedding": embedding,
+                }
+
+            if len(ids) < batch_size:
+                break
+            offset += batch_size
+
+    def import_records(
+        self, name: str, entries: list[ImportEntry], *, mode: str = "add"
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        """Write parsed JSONL import rows into the collection named ``name``
+        (roadmap M4-3, technical-spec §8).
+
+        ``mode="add"`` (default) rejects rows whose ``id`` already exists in
+        the collection -- checked up front via a single batched
+        ``get_records(ids=..., include=())`` lookup, so those rows never
+        reach ``collection.add()`` and are reported back as line-numbered
+        errors (``"id already exists"``) rather than aborting the whole
+        import. ``mode="upsert"`` skips that check entirely and lets
+        ``collection.upsert()`` overwrite any existing id.
+
+        Rows are split into two groups before being written, because
+        chromadb's ``collection.add()``/``collection.upsert()`` take a
+        single ``embeddings=[...]`` list applying uniformly to the whole
+        call (there is no way to say "use the given vector for this row,
+        but compute one from the document for that row" in one call):
+
+        - rows that carried an explicit ``embedding`` in the JSONL are
+          written with that vector, bypassing the collection's embedding
+          function entirely (mirrors ``update_record``'s "keep" mode not
+          letting chromadb recompute a vector it wasn't asked to);
+        - rows without an ``embedding`` are written with only ``documents``,
+          letting chromadb's configured embedding function compute the
+          vector -- this fails (surfaced as a per-row error, not a raised
+          exception -- see below) if no embedding function is available,
+          same underlying cause as ``EmbeddingFunctionUnavailableError``
+          elsewhere in this module.
+
+        Each group is additionally chunked to at most ``client.
+        get_max_batch_size()`` rows per ``collection.add()``/``collection.
+        upsert()`` call (chromadb rejects an entire call outright if it
+        exceeds this limit, so a large import would otherwise fail in full
+        rather than making partial progress); if the client doesn't expose
+        ``get_max_batch_size`` (defensive -- older/alternate chromadb
+        clients), a fixed fallback of ``_DEFAULT_MAX_BATCH_SIZE`` (1000) is
+        used instead. If a chunk's write call raises, every row in *that
+        chunk* (not the one row actually at fault, which chromadb does not
+        identify, and not the whole group -- other chunks are written
+        independently and are unaffected) is reported as a line-numbered
+        error with the exception's message as ``reason`` -- a deliberate
+        simplification matching ``get_records``'s ``InvalidFilterError``
+        handling: chromadb gives this adapter no reliable way to attribute a
+        batch failure to one specific row.
+
+        Returns a ``(imported_ids, errors)`` tuple: ``imported_ids`` are the
+        ids of rows actually written (in the order given); ``errors`` are
+        ``{"line": int, "reason": str}`` dicts for rows that were rejected
+        before or during the write (id-already-exists, or a batch write
+        failure).
+
+        Raises:
+            CollectionNotFoundError: no collection named ``name`` exists.
+        """
+        try:
+            collection = self._client.get_collection(name)
+        except Exception as exc:
+            raise CollectionNotFoundError(f"collection not found: {name}") from exc
+
+        if not entries:
+            return [], []
+
+        errors: list[dict[str, Any]] = []
+        usable = list(entries)
+
+        if mode == "add":
+            existing_records, _, _ = self.get_records(
+                name, ids=[e.id for e in usable], include=()
+            )
+            existing_ids = {record.id for record in existing_records}
+            remaining: list[ImportEntry] = []
+            for entry in usable:
+                if entry.id in existing_ids:
+                    errors.append(
+                        {
+                            "line": entry.line,
+                            "reason": (
+                                f"id already exists: {entry.id!r} "
+                                "(use mode=upsert to overwrite)"
+                            ),
+                        }
+                    )
+                else:
+                    remaining.append(entry)
+            usable = remaining
+
+        with_embedding = [e for e in usable if e.embedding is not None]
+        without_embedding = [e for e in usable if e.embedding is None]
+
+        try:
+            max_batch_size = self._client.get_max_batch_size()
+        except AttributeError:
+            max_batch_size = _DEFAULT_MAX_BATCH_SIZE
+        if not max_batch_size or max_batch_size <= 0:
+            max_batch_size = _DEFAULT_MAX_BATCH_SIZE
+
+        imported: list[str] = []
+
+        def _write_chunk(chunk: list[ImportEntry], include_embeddings: bool) -> None:
+            write_kwargs: dict[str, Any] = {
+                "ids": [e.id for e in chunk],
+                "documents": [e.document for e in chunk],
+                "metadatas": [e.metadata for e in chunk],
+            }
+            if any(e.uri is not None for e in chunk):
+                write_kwargs["uris"] = [e.uri for e in chunk]
+            if include_embeddings:
+                write_kwargs["embeddings"] = [e.embedding for e in chunk]
+
+            try:
+                if mode == "upsert":
+                    collection.upsert(**write_kwargs)
+                else:
+                    collection.add(**write_kwargs)
+            except Exception as exc:
+                for e in chunk:
+                    errors.append({"line": e.line, "reason": f"import failed: {exc}"})
+                return
+
+            imported.extend(e.id for e in chunk)
+
+        def _write(group: list[ImportEntry], include_embeddings: bool) -> None:
+            for start in range(0, len(group), max_batch_size):
+                chunk = group[start : start + max_batch_size]
+                _write_chunk(chunk, include_embeddings)
+
+        _write(with_embedding, include_embeddings=True)
+        _write(without_embedding, include_embeddings=False)
+
+        return imported, errors
 

@@ -68,6 +68,87 @@ class AuditLogger:
         }
         self._append(entry)
 
+    def log_delete_record(
+        self,
+        *,
+        collection: str,
+        record_id: str,
+        before: dict[str, Any],
+    ) -> None:
+        """Append a ``record.delete`` entry (roadmap M2-7).
+
+        ``before`` is the full record snapshot (document/metadata/uri) as it
+        existed immediately before deletion, so the audit log alone is
+        enough to see what was lost without needing the backup on hand.
+        """
+
+        entry = {
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "operation": "record.delete",
+            "collection": collection,
+            "id": record_id,
+            "before": before,
+            "user_agent": f"chromaw/{__version__}",
+        }
+        self._append(entry)
+
+    def log_delete_collection(
+        self,
+        *,
+        collection: str,
+        before: dict[str, Any],
+    ) -> None:
+        """Append a ``collection.delete`` entry (roadmap M2-7).
+
+        ``before`` is the collection's summary info (id/count/metadata/
+        dimension) immediately before deletion.
+        """
+
+        entry = {
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "operation": "collection.delete",
+            "collection": collection,
+            "before": before,
+            "user_agent": f"chromaw/{__version__}",
+        }
+        self._append(entry)
+
+    def log_rename_collection(
+        self,
+        *,
+        before_name: str,
+        after_name: str,
+    ) -> None:
+        """Append a ``collection.rename`` entry (roadmap M2-7)."""
+
+        entry = {
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "operation": "collection.rename",
+            "collection": before_name,
+            "changes": {"name": {"before": before_name, "after": after_name}},
+            "user_agent": f"chromaw/{__version__}",
+        }
+        self._append(entry)
+
+    def log_update_collection_metadata(
+        self,
+        *,
+        collection: str,
+        before: dict[str, Any] | None,
+        after: dict[str, Any] | None,
+    ) -> None:
+        """Append a ``collection.update`` entry for a metadata-only PATCH
+        (roadmap M2-7)."""
+
+        entry = {
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "operation": "collection.update",
+            "collection": collection,
+            "changes": {"metadata": {"before": before, "after": after}},
+            "user_agent": f"chromaw/{__version__}",
+        }
+        self._append(entry)
+
     def _append(self, entry: dict[str, Any]) -> None:
         audit_dir = self.chroma_path / _CHROMAW_DIRNAME
         audit_path = audit_dir / _AUDIT_FILENAME

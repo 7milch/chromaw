@@ -11,7 +11,9 @@ from chromaw.errors import (
     ChromaEmptyDirectoryError,
     ChromaInvalidDirectoryError,
     ChromaPathNotFoundError,
+    CollectionAlreadyExistsError,
     CollectionNotFoundError,
+    InvalidCollectionNameError,
     InvalidFilterError,
     RecordNotFoundError,
 )
@@ -393,4 +395,127 @@ class ChromaAdapter:
                 update_kwargs["embeddings"] = [list(existing_embeddings[0])]
 
         collection.update(**update_kwargs)
+
+    def delete_record(self, name: str, record_id: str) -> None:
+        """Delete a single record from the collection named ``name``
+        (technical-spec §3.2, §5.3, §6.5, roadmap M2-7).
+
+        Existence of ``record_id`` is checked up front via
+        ``collection.get(ids=[record_id])`` so a missing record raises
+        ``RecordNotFoundError`` instead of chromadb's ``delete()`` silently
+        no-op'ing for unknown ids.
+
+        Raises:
+            CollectionNotFoundError: no collection named ``name`` exists.
+            RecordNotFoundError: no record with id ``record_id`` exists in
+                the collection.
+        """
+        try:
+            collection = self._client.get_collection(name)
+        except Exception as exc:
+            raise CollectionNotFoundError(f"collection not found: {name}") from exc
+
+        existing = collection.get(ids=[record_id], include=[])
+        if not existing.get("ids"):
+            raise RecordNotFoundError(
+                f"record not found: {record_id!r} in collection {name!r}"
+            )
+
+        collection.delete(ids=[record_id])
+
+    def delete_collection(self, name: str) -> None:
+        """Delete the collection named ``name`` in its entirety
+        (technical-spec §3.2, §5.2, §6.5, roadmap M2-7).
+
+        Existence is checked up front via ``get_collection`` so a missing
+        collection raises ``CollectionNotFoundError`` with a consistent
+        message, rather than relying on whatever chromadb's
+        ``delete_collection`` raises for an unknown name.
+
+        Raises:
+            CollectionNotFoundError: no collection named ``name`` exists.
+        """
+        try:
+            self._client.get_collection(name)
+        except Exception as exc:
+            raise CollectionNotFoundError(f"collection not found: {name}") from exc
+
+        self._client.delete_collection(name)
+
+    def update_collection(
+        self,
+        name: str,
+        *,
+        new_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> CollectionInfo:
+        """Rename and/or update the metadata of the collection named
+        ``name`` (technical-spec §5.2, §8.2, roadmap M2-7).
+
+        Unlike ``collection.update()`` for records, chromadb's
+        ``collection.modify(metadata=...)`` *replaces* the collection's
+        metadata wholesale rather than merging it. To keep the same "merge"
+        semantics as record metadata updates (technical-spec §5.4) -- so a
+        metadata PATCH here can't silently wipe out unrelated existing
+        keys -- this method merges ``metadata`` into the collection's
+        current metadata itself before calling ``collection.modify()``.
+        Rename and metadata are applied via a single ``collection.modify()``
+        call. At least one of ``new_name``/``metadata`` is expected to be
+        given by the caller (enforced by ``CollectionUpdateRequest`` at the
+        API layer).
+
+        Raises:
+            CollectionNotFoundError: no collection named ``name`` exists.
+            InvalidCollectionNameError: ``new_name`` is rejected by chromadb
+                as malformed (empty, too long, disallowed characters, ...).
+            CollectionAlreadyExistsError: ``new_name`` collides with another
+                existing collection.
+        """
+        try:
+            collection = self._client.get_collection(name)
+        except Exception as exc:
+            raise CollectionNotFoundError(f"collection not found: {name}") from exc
+
+        modify_kwargs: dict[str, Any] = {}
+        if new_name is not None:
+            modify_kwargs["name"] = new_name
+        if metadata is not None:
+            modify_kwargs["metadata"] = {**(collection.metadata or {}), **metadata}
+
+        try:
+            collection.modify(**modify_kwargs)
+        except Exception as exc:
+            if new_name is None:
+                raise
+            # chromadb doesn't give this adapter a distinct exception type
+            # for "name already taken" vs. "name malformed" -- both surface
+            # as generic errors (e.g. ValueError/ChromaError, or a raw
+            # sqlite UNIQUE constraint error) from collection.modify().
+            # Attribute the error to whichever is more likely from its
+            # message, defaulting to "invalid name" so an unrecognized
+            # failure still becomes a 422 (client error) rather than a 500.
+            message = str(exc).lower()
+            if "exist" in message or "unique constraint" in message:
+                raise CollectionAlreadyExistsError(
+                    f"collection already exists: {new_name!r}"
+                ) from exc
+            raise InvalidCollectionNameError(
+                f"invalid collection name {new_name!r}: {exc}"
+            ) from exc
+
+        count = collection.count()
+        dimension: int | None = None
+        if count > 0:
+            sample = collection.get(limit=1, include=["embeddings"])
+            embeddings = sample.get("embeddings")
+            if embeddings is not None and len(embeddings) > 0:
+                dimension = len(embeddings[0])
+
+        return CollectionInfo(
+            id=str(collection.id),
+            name=collection.name,
+            count=count,
+            metadata=collection.metadata,
+            dimension=dimension,
+        )
 

@@ -15,7 +15,10 @@ from chromaw.chroma_adapter import ChromaAdapter
 from chromaw.errors import (
     AuditWriteFailedError,
     BackupFailedError,
+    CollectionAlreadyExistsError,
     CollectionNotFoundError,
+    ConfirmationMismatchError,
+    InvalidCollectionNameError,
     InvalidFilterError,
     RecordNotFoundError,
 )
@@ -108,6 +111,29 @@ def create_app(
         _: Request, exc: RecordNotFoundError
     ) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(ConfirmationMismatchError)
+    async def _confirmation_mismatch_handler(
+        _: Request, exc: ConfirmationMismatchError
+    ) -> JSONResponse:
+        # technical-spec §3.2/§6.5: a wrong/missing confirm value means the
+        # destructive request conflicts with what the server requires to
+        # proceed -- 409, not 422 (the request is well-formed, just not
+        # confirmed) and not 400 (nothing about the confirm field's *shape*
+        # is invalid).
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(CollectionAlreadyExistsError)
+    async def _collection_already_exists_handler(
+        _: Request, exc: CollectionAlreadyExistsError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(InvalidCollectionNameError)
+    async def _invalid_collection_name_handler(
+        _: Request, exc: InvalidCollectionNameError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
 
     @app.exception_handler(BackupFailedError)
     async def _backup_failed_handler(_: Request, exc: BackupFailedError) -> JSONResponse:

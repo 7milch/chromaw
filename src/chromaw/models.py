@@ -139,6 +139,80 @@ class RecordUpdateRequest(BaseModel):
         return self
 
 
+class RecordDeleteRequest(BaseModel):
+    """Request body for ``DELETE /api/collections/{name}/records/{id}``
+    (technical-spec §3.2, §6.5, roadmap M2-7).
+
+    Deleting a record is destructive, so ``confirm`` must be given and is
+    checked against the record id in the URL by the endpoint (client error
+    -- ``ConfirmationMismatchError``, mapped to 409 -- if it doesn't match).
+    """
+
+    confirm: str
+
+
+class CollectionDeleteRequest(BaseModel):
+    """Request body for ``DELETE /api/collections/{name}`` (technical-spec
+    §3.2, §5.2, §6.5, roadmap M2-7).
+
+    ``confirm`` must match the collection name in the URL, checked by the
+    endpoint the same way as ``RecordDeleteRequest.confirm``.
+    """
+
+    confirm: str
+
+
+class CollectionUpdateRequest(BaseModel):
+    """Request body for ``PATCH /api/collections/{name}`` (technical-spec
+    §5.2, §8.2, roadmap M2-7).
+
+    ``name`` renames the collection; ``metadata`` updates its metadata.
+    chromadb's ``collection.modify(metadata=...)`` replaces the collection's
+    metadata wholesale, so ``ChromaAdapter.update_collection`` merges
+    ``metadata`` into the collection's current metadata itself before
+    calling ``collection.modify()``, giving the same merge semantics as
+    record metadata updates. At least one of
+    ``name``/``metadata`` must be given (422 otherwise, matching
+    ``RecordUpdateRequest``'s no-op guard).
+
+    Renaming is a destructive operation (technical-spec §3.2, §6.5): when
+    ``name`` is given, ``confirm`` must also be given and is checked by the
+    endpoint against the collection's *current* name (client error --
+    ``ConfirmationMismatchError``, mapped to 409 -- if it doesn't match).
+    Renaming is not itself the source of truth for that comparison since the
+    request body has no access to the URL path parameter; the endpoint
+    performs the actual check. A metadata-only update (no ``name``) is
+    non-destructive and does not require ``confirm``.
+    """
+
+    name: str | None = None
+    metadata: dict | None = None
+    confirm: str | None = None
+
+    @model_validator(mode="after")
+    def _check_at_least_one_field(self) -> "CollectionUpdateRequest":
+        if self.name is None and self.metadata is None:
+            raise ValueError("at least one of name/metadata must be given")
+        return self
+
+    @model_validator(mode="after")
+    def _check_rename_requires_confirm(self) -> "CollectionUpdateRequest":
+        if self.name is not None and self.confirm is None:
+            raise ValueError(
+                "confirm must be given when renaming a collection "
+                "(technical-spec §3.2, §6.5): pass the collection's current "
+                "name as confirm to acknowledge the rename"
+            )
+        return self
+
+
+class DeleteResponse(BaseModel):
+    """Response body for the record/collection DELETE endpoints."""
+
+    deleted: bool
+    id: str
+
+
 class DiffRequest(BaseModel):
     """Request body for ``POST /api/diff`` (technical-spec §8, M2-4).
 

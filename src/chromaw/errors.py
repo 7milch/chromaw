@@ -41,6 +41,24 @@ class BackupFailedError(ChromawError):
     backup was meant to protect must not proceed."""
 
 
+class ConfirmationMismatchError(ChromawError):
+    """Raised when a destructive request's ``confirm`` field does not match
+    the target name (technical-spec §3.2, §6.5): record delete, collection
+    delete, and collection rename all require the caller to type the exact
+    target name/id before the operation is carried out."""
+
+
+class InvalidCollectionNameError(ChromawError):
+    """Raised when a collection rename's ``new_name`` is rejected by
+    chromadb as an invalid collection name (e.g. empty, too long, disallowed
+    characters)."""
+
+
+class CollectionAlreadyExistsError(ChromawError):
+    """Raised when a collection rename's ``new_name`` collides with an
+    existing collection in the same ChromaDB directory."""
+
+
 class AuditWriteFailedError(ChromawError):
     """Raised when an audit log entry (technical-spec §9.2) could not be
     appended to ``.chromaw/audit.jsonl``. chromaw treats audit logging as
